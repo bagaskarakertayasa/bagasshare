@@ -1,0 +1,301 @@
+:root {
+  /* Fondasi (DESIGN-BRIEF 3.1) */
+  --ground: #f2f4f0;
+  --surface: #ffffff;
+  --surface-sunken: #e6eae2;
+  --line: #cbd2c8;
+  --line-strong: #7c877f;
+  --ink: #121a16;
+  --ink-muted: #55615b;
+
+  /* Data dan status */
+  --data: #1e4fe0;
+  --success: #1f7a3d;
+  --warning: #8a5a00;
+  --warning-bg: #f4e3b8;
+  --danger: #b3261e;
+
+  /* Identitas device (4 slot pucat) */
+  --slot-1-bg: #f6d9dd;
+  --slot-1-fg: #8a2336;
+  --slot-2-bg: #f4e3b8;
+  --slot-2-fg: #5e4200;
+  --slot-3-bg: #d3ead6;
+  --slot-3-fg: #1f5a2e;
+  --slot-4-bg: #dae5fa;
+  --slot-4-fg: #1d3f93;
+
+  /* Tipografi (DESIGN-BRIEF 3.2) */
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+
+  /* Spacing (DESIGN-BRIEF 3.3, basis 4 px) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Radius (DESIGN-BRIEF 3.4: tiga nilai saja) */
+  --radius-sm: 6px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  /* Shadow hanya untuk elemen melayang (DESIGN-BRIEF 3.5) */
+  --shadow-float: 0 8px 24px rgba(18, 26, 22, 0.16);
+  --overlay-bg: rgba(18, 26, 22, 0.48);
+
+  /* Motion (DESIGN-BRIEF 3.6) */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: var(--space-2);
+  background: var(--ink);
+  color: var(--surface);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  z-index: 200;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  left: var(--space-4);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* Shell dan Grid (DESIGN-BRIEF 6 S1: 4 x 256 + 3 x 24 = 1096) */
+.app-bar {
+  height: 56px;
+  background-color: var(--ground);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-bar-inner {
+  max-width: 1160px;
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.canvas {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+.title-row {
+  margin-bottom: var(--space-5);
+}
+
+.h1 {
+  margin: 0 0 var(--space-1) 0;
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--ink-muted);
+}
+
+.keep-open-note {
+  margin: var(--space-1) 0 0 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-muted);
+}
+
+/* Grid petak device: desktop 4 kolom, tablet 2 kolom, HP 1 kolom */
+.device-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-5);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+@media (max-width: 1023px) {
+  .app-bar-inner,
+  .canvas {
+    padding-left: var(--space-5);
+    padding-right: var(--space-5);
+  }
+  .device-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 639px) {
+  .app-bar-inner,
+  .canvas {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+  .h1 {
+    font-size: 24px;
+    line-height: 30px;
+  }
+  .device-grid {
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
+  }
+}
+
+/* Tombol standar (DESIGN-BRIEF 7) */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.btn-primary {
+  background-color: var(--ink);
+  color: var(--surface);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: #24322b;
+}
+
+.btn-secondary {
+  background-color: var(--surface-sunken);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--line);
+}
+
+.btn-danger {
+  background-color: var(--surface);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn:disabled {
+  background-color: var(--surface-sunken);
+  color: var(--ink-muted);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
+/* Dialog / Sheet (DESIGN-BRIEF 6 S2, S3, S5) */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: var(--overlay-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  z-index: 100;
+}
+
+.dialog-box {
+  background-color: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
+  width: 100%;
+  max-width: 560px;
+  max-height: 85dvh;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5);
+}
+
+@media (max-width: 639px) {
+  .dialog-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .dialog-box {
+    max-width: 100%;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    padding: var(--space-4);
+  }
+}

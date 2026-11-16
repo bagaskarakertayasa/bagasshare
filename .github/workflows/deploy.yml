@@ -1,0 +1,81 @@
+name: CI/CD Deploy Bagas Share to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  ci-check:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Run unit tests
+        run: pnpm -r test
+
+  deploy:
+    name: Deploy to VPS
+    needs: ci-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH & Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              . "$NVM_DIR/nvm.sh"
+            fi
+            export PATH="$PATH:/usr/local/bin:$HOME/.local/bin"
+
+            if ! command -v pnpm >/dev/null 2>&1; then
+              npm install -g pnpm@9.15.0
+            fi
+
+            if [ -d "/var/www/bagas-share" ]; then
+              cd /var/www/bagas-share
+            elif [ -d "$HOME/bagas-share" ]; then
+              cd "$HOME/bagas-share"
+            else
+              echo "Folder project bagas-share tidak ditemukan!"
+              exit 1
+            fi
+
+            echo "--> Menarik perubahan terbaru dari branch main..."
+            git fetch https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
+            git reset --hard FETCH_HEAD
+
+            echo "--> Menginstal dependencies dan mem-build monorepo..."
+            pnpm install --frozen-lockfile
+            pnpm -r build
+
+            echo "--> Me-restart aplikasi di PM2..."
+            pm2 restart bagas-share || pm2 start ecosystem.config.cjs
+            pm2 save
+
+            echo "--> Deployment Bagas Share selesai!"

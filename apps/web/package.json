@@ -1,0 +1,22 @@
+{
+  "name": "@bagas-share/web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "@bagas-share/shared": "workspace:*",
+    "@fontsource/plus-jakarta-sans": "^5.1.0",
+    "hash-wasm": "^4.12.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "svelte": "^5.14.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
