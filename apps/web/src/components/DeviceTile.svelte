@@ -49,6 +49,7 @@
     bind:this={fileInput}
     type="file"
     multiple
+    hidden
     class="sr-only"
     tabindex="-1"
     onchange={handleFilesSelected}

@@ -261,8 +261,13 @@ class AppState {
     }
   }
 
-  private saveSenderResumeSession(data: PendingSenderResume | null): void {
-    this.pendingSenderResume = data;
+  private saveSenderResumeSession(
+    data: PendingSenderResume | null,
+    showBanner = false
+  ): void {
+    if (!data || showBanner) {
+      this.pendingSenderResume = data;
+    }
     if (typeof sessionStorage === 'undefined') return;
     if (data) {
       sessionStorage.setItem(SENDER_RESUME_SESSION_KEY, JSON.stringify(data));

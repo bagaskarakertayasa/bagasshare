@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "node --watch dist/index.js",
-    "start": "node dist/index.js",
+    "dev": "node --watch dist/start.js",
+    "start": "node dist/start.js",
     "test": "vitest run"
   },
   "dependencies": {

@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'bagas-share',
       cwd: __dirname,
-      script: 'apps/server/dist/index.js',
+      script: 'apps/server/dist/start.js',
       node_args: '--max-old-space-size=192',
       env: {
         NODE_ENV: 'production',
