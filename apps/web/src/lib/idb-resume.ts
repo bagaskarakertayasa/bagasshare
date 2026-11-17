@@ -75,27 +75,28 @@ export async function saveTransferMeta(meta: StoredTransferMeta): Promise<boolea
 }
 
 /**
- * Menyimpan batch chunk (mis. setiap 32 chunk = 512 KiB) dan memperbarui lastChunkIndex
- * dalam satu transaksi agar Safari iOS tetap cepat (TECH-DESIGN 7.2.C).
+ * Menyimpan segmen (mis. 4 MiB = 256 chunk) sebagai satu Blob di IndexedDB,
+ * bukan puluhan ribu ArrayBuffer 16 KiB, sehingga untuk file 500 MB hanya ada
+ * ~125 record di IndexedDB dan tidak melewati batas IPC/RAM browser (Chromium & Safari iOS).
  */
-export async function saveChunkBatch(
+export async function saveSegmentBlob(
   fileSha256: string,
-  chunks: Array<{ chunkIndex: number; data: ArrayBuffer }>,
-  lastChunkIndex: number
+  segmentStartChunk: number,
+  lastChunkIndex: number,
+  segmentBlob: Blob
 ): Promise<boolean> {
   const db = await openDb();
-  if (!db || chunks.length === 0) return true;
+  if (!db) return false;
   return new Promise((resolve) => {
     try {
       const tx = db.transaction(['transfers', 'chunks'], 'readwrite');
       const chunkStore = tx.objectStore('chunks');
-      for (const c of chunks) {
-        chunkStore.put({
-          fileSha256,
-          chunkIndex: c.chunkIndex,
-          data: c.data,
-        } satisfies StoredChunkRecord);
-      }
+      chunkStore.put({
+        fileSha256,
+        chunkIndex: segmentStartChunk,
+        data: segmentBlob as unknown as ArrayBuffer,
+      } satisfies StoredChunkRecord);
+
       const trStore = tx.objectStore('transfers');
       const getReq = trStore.get(fileSha256);
       getReq.onsuccess = () => {
@@ -130,9 +131,13 @@ export async function getAllStoredTransfers(): Promise<StoredTransferMeta[]> {
   });
 }
 
+/**
+ * Mengambil segmen secara bertahap dengan cursor (bukan getAll sekaligus)
+ * dan merakitnya menjadi satu Blob file utuh tanpa menggandakan RAM.
+ */
 export async function assembleBlobFromChunks(
   fileSha256: string,
-  totalChunks: number,
+  expectedByteSize: number,
   mimeType: string
 ): Promise<Blob | null> {
   const db = await openDb();
@@ -141,19 +146,29 @@ export async function assembleBlobFromChunks(
     try {
       const tx = db.transaction('chunks', 'readonly');
       const idx = tx.objectStore('chunks').index('by_file');
-      const req = idx.getAll(IDBKeyRange.only(fileSha256));
-      req.onsuccess = () => {
-        const rows = ((req.result as StoredChunkRecord[]) || []).sort(
-          (a, b) => a.chunkIndex - b.chunkIndex
-        );
-        if (rows.length < totalChunks) {
-          resolve(null);
-          return;
+      const parts: Array<{ chunkIndex: number; data: Blob | ArrayBuffer }> = [];
+      const cursorReq = idx.openCursor(IDBKeyRange.only(fileSha256));
+
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (cursor) {
+          const val = cursor.value as { chunkIndex: number; data: Blob | ArrayBuffer };
+          parts.push({ chunkIndex: val.chunkIndex, data: val.data });
+          cursor.continue();
+        } else {
+          parts.sort((a, b) => a.chunkIndex - b.chunkIndex);
+          const blob = new Blob(
+            parts.map((p) => p.data),
+            { type: mimeType || 'application/octet-stream' }
+          );
+          if (blob.size !== expectedByteSize) {
+            resolve(null);
+            return;
+          }
+          resolve(blob);
         }
-        const parts = rows.slice(0, totalChunks).map((r) => r.data);
-        resolve(new Blob(parts, { type: mimeType || 'application/octet-stream' }));
       };
-      req.onerror = () => resolve(null);
+      cursorReq.onerror = () => resolve(null);
     } catch {
       resolve(null);
     }

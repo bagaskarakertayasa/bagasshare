@@ -16,11 +16,12 @@ import {
   equalBytes,
   sha256ChunkBytes,
 } from './hash.js';
+import { createSHA256 } from 'hash-wasm';
 import {
   assembleBlobFromChunks,
   deleteStoredFile,
   getAllStoredTransfers,
-  saveChunkBatch,
+  saveSegmentBlob,
   saveTransferMeta,
 } from './idb-resume.js';
 
@@ -53,6 +54,7 @@ export class WebRtcTransferSession {
   private dc: RTCDataChannel | null = null;
   private pendingIce: RtcIceCandidatePayload[] = [];
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private verifiedWaiters = new Map<string, (ok: boolean) => void>();
   private aborted = false;
 
   constructor(
@@ -130,8 +132,17 @@ export class WebRtcTransferSession {
         startedSending = true;
         resumeMap = msg.files || {};
         await this.runSenderLoop(dc, resumeMap);
-      } else if (msg.type === 'file:verified' && !msg.ok) {
-        this.callbacks.onFailedChecksum(msg.fileId);
+      } else if (msg.type === 'file:verified') {
+        if (!msg.ok) {
+          this.callbacks.onFailedChecksum(msg.fileId);
+          this.close();
+          return;
+        }
+        const WaitResolver = this.verifiedWaiters.get(msg.fileId);
+        if (WaitResolver) {
+          this.verifiedWaiters.delete(msg.fileId);
+          WaitResolver(true);
+        }
       }
     };
 
@@ -254,7 +265,14 @@ export class WebRtcTransferSession {
         fileId: item.meta.fileId,
         sha256: item.meta.sha256,
       };
+      const verifiedPromise = new Promise<boolean>((resolve) => {
+        this.verifiedWaiters.set(item.meta.fileId, resolve);
+      });
       dc.send(JSON.stringify(endMsg));
+
+      // Tunggu konfirmasi penerima bahwa file sudah dirakit & terverifikasi sebelum menandai Selesai
+      const ok = await verifiedPromise;
+      if (!ok || this.aborted) return;
     }
 
     const doneMsg: DcControlMessage = { type: 'transfer:done' };
@@ -264,18 +282,21 @@ export class WebRtcTransferSession {
 
   private setupReceiverChannel(dc: RTCDataChannel): void {
     let activeMeta: TransferFileMeta | null = null;
-    let activeTotalChunks = 0;
     let receivedBytes = 0;
-    let pendingBatch: Array<{ chunkIndex: number; data: ArrayBuffer }> = [];
-    let memoryFallbackParts: ArrayBuffer[] = [];
+    let segmentStartChunk = 0;
+    let lastReceivedChunkIndex = -1;
+    let pendingSegmentParts: ArrayBuffer[] = [];
+    let memoryFallbackBlobs: Blob[] = [];
     let useMemoryFallback = false;
+    let fileHasher: Awaited<ReturnType<typeof createSHA256>> | null = null;
+    let isIncrementalHashValid = true;
     let processingQueue = Promise.resolve();
 
     dc.onopen = async () => {
       this.clearConnectTimer();
       this.callbacks.onConnected();
 
-      // Cek apakah ada chunk parsial yang tersimpan di IndexedDB untuk file-file ini
+      // Cek apakah ada segmen parsial yang tersimpan di IndexedDB untuk file-file ini
       const stored = await getAllStoredTransfers();
       const storedBySha = new Map(stored.map((s) => [s.fileSha256, s]));
       const resumeFiles: Record<string, { nextChunkIndex: number }> = {};
@@ -323,14 +344,22 @@ export class WebRtcTransferSession {
           if (ctrl.type === 'file:start') {
             activeMeta =
               this.filesMeta.find((f) => f.fileId === ctrl.fileId) ?? null;
-            activeTotalChunks = ctrl.totalChunks;
             receivedBytes = Math.min(
               ctrl.size,
               ctrl.startChunkIndex * CHUNK_SIZE_BYTES
             );
-            pendingBatch = [];
+            segmentStartChunk = ctrl.startChunkIndex;
+            lastReceivedChunkIndex = ctrl.startChunkIndex - 1;
+            pendingSegmentParts = [];
             if (ctrl.startChunkIndex === 0) {
-              memoryFallbackParts = [];
+              memoryFallbackBlobs = [];
+              fileHasher = await createSHA256();
+              fileHasher.init();
+              isIncrementalHashValid = true;
+            } else {
+              // Jika resume dari tengah file, nanti verifikasi dihitung dari Blob akhir
+              fileHasher = null;
+              isIncrementalHashValid = false;
             }
             if (activeMeta && receivedBytes > 0) {
               this.callbacks.onFileProgress(
@@ -341,18 +370,22 @@ export class WebRtcTransferSession {
             }
           } else if (ctrl.type === 'file:end' && activeMeta) {
             const currentMeta = activeMeta;
-            if (!useMemoryFallback && pendingBatch.length > 0) {
-              const lastIdx = pendingBatch[pendingBatch.length - 1]!.chunkIndex;
-              const saved = await saveChunkBatch(
-                currentMeta.sha256,
-                pendingBatch,
-                lastIdx
-              );
-              pendingBatch = [];
-              if (!saved) {
-                this.callbacks.onFailedStorage();
-                this.close();
-                return;
+            if (pendingSegmentParts.length > 0) {
+              const segBlob = new Blob(pendingSegmentParts);
+              pendingSegmentParts = [];
+              if (useMemoryFallback) {
+                memoryFallbackBlobs.push(segBlob);
+              } else {
+                const saved = await saveSegmentBlob(
+                  currentMeta.sha256,
+                  segmentStartChunk,
+                  lastReceivedChunkIndex,
+                  segBlob
+                );
+                if (!saved) {
+                  useMemoryFallback = true;
+                  memoryFallbackBlobs.push(segBlob);
+                }
               }
             }
 
@@ -360,17 +393,34 @@ export class WebRtcTransferSession {
             if (!useMemoryFallback) {
               blob = await assembleBlobFromChunks(
                 currentMeta.sha256,
-                activeTotalChunks,
+                currentMeta.size,
                 currentMeta.mimeType
               );
             }
-            if (!blob) {
-              blob = new Blob(memoryFallbackParts, {
+            if (!blob && memoryFallbackBlobs.length > 0) {
+              blob = new Blob(memoryFallbackBlobs, {
                 type: currentMeta.mimeType || 'application/octet-stream',
               });
             }
 
-            const actualSha = await computeFileSha256Hex(blob);
+            if (!blob || blob.size !== currentMeta.size) {
+              dc.send(
+                JSON.stringify({
+                  type: 'file:verified',
+                  fileId: currentMeta.fileId,
+                  ok: false,
+                } satisfies DcControlMessage)
+              );
+              await deleteStoredFile(currentMeta.sha256);
+              this.callbacks.onFailedStorage();
+              this.close();
+              return;
+            }
+
+            const actualSha =
+              isIncrementalHashValid && fileHasher
+                ? fileHasher.digest('hex')
+                : await computeFileSha256Hex(blob);
             const verified =
               blob.size === currentMeta.size && actualSha === currentMeta.sha256;
 
@@ -402,25 +452,31 @@ export class WebRtcTransferSession {
             return;
           }
 
+          if (isIncrementalHashValid && fileHasher) {
+            fileHasher.update(decoded.payload);
+          }
+
           const copyBuf = new ArrayBuffer(decoded.payload.byteLength);
           new Uint8Array(copyBuf).set(decoded.payload);
+          pendingSegmentParts.push(copyBuf);
+          lastReceivedChunkIndex = decoded.chunkIndex;
 
-          if (useMemoryFallback) {
-            memoryFallbackParts.push(copyBuf);
-          } else {
-            pendingBatch.push({
-              chunkIndex: decoded.chunkIndex,
-              data: copyBuf,
-            });
-            // Batch simpan setiap 32 chunk (512 KiB)
-            if (pendingBatch.length >= 32) {
-              const batchToSave = pendingBatch;
-              pendingBatch = [];
-              const lastIdx = batchToSave[batchToSave.length - 1]!.chunkIndex;
-              const ok = await saveChunkBatch(
+          // Simpan per segmen 256 chunk (4 MiB) sebagai satu Blob di IndexedDB
+          if (pendingSegmentParts.length >= 256) {
+            const segBlob = new Blob(pendingSegmentParts);
+            const startIdx = segmentStartChunk;
+            const endIdx = lastReceivedChunkIndex;
+            pendingSegmentParts = [];
+            segmentStartChunk = endIdx + 1;
+
+            if (useMemoryFallback) {
+              memoryFallbackBlobs.push(segBlob);
+            } else {
+              const ok = await saveSegmentBlob(
                 activeMeta.sha256,
-                batchToSave,
-                lastIdx
+                startIdx,
+                endIdx,
+                segBlob
               );
               if (!ok) {
                 this.callbacks.onFailedStorage();
@@ -447,6 +503,10 @@ export class WebRtcTransferSession {
   close(): void {
     this.aborted = true;
     this.clearConnectTimer();
+    for (const [, resolve] of this.verifiedWaiters) {
+      resolve(false);
+    }
+    this.verifiedWaiters.clear();
     if (this.dc) {
       try {
         this.dc.close();
