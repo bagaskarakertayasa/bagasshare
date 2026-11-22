@@ -2,7 +2,7 @@ bagasshare.web.id {
     encode zstd gzip
 
     @ws {
-        path /ws*
+        path /ws* /api/*
     }
     reverse_proxy @ws 127.0.0.1:3001 {
         header_up X-Real-IP {remote_host}

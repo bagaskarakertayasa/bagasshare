@@ -8,6 +8,8 @@
   import ComposerDialog from './components/ComposerDialog.svelte';
   import IncomingDialog from './components/IncomingDialog.svelte';
   import PairingDialog from './components/PairingDialog.svelte';
+  import LinkShareDialog from './components/LinkShareDialog.svelte';
+  import LinkDownloadView from './components/LinkDownloadView.svelte';
   import Toast from './components/Toast.svelte';
 
   onMount(() => {
@@ -32,6 +34,12 @@
       <a href="/" class="btn btn-primary">{appState.t('backHomeLink')}</a>
     </div>
   </main>
+{:else if appState.downloadLinkId}
+  <AppBar />
+  <LinkDownloadView linkId={appState.downloadLinkId} />
+  <LinkShareDialog />
+  <PairingDialog />
+  <Toast />
 {:else}
   <a href="#main-devices" class="skip-link">
     {appState.t('skipToMain')}
@@ -53,6 +61,7 @@
             selfName: appState.selfDisplayName || 'Anda',
           })}
         </p>
+        <p class="keep-open-note tabular">{appState.t('transferLimitsNote')}</p>
         <p class="keep-open-note">{appState.t('keepTabOpenNote')}</p>
       {:else}
         <p class="subtitle">
@@ -60,6 +69,7 @@
             selfName: appState.selfDisplayName || 'Anda',
           })}
         </p>
+        <p class="keep-open-note tabular">{appState.t('transferLimitsNote')}</p>
       {/if}
 
       <p class="mobile-quota tabular">
@@ -108,6 +118,7 @@
   <ComposerDialog />
   <IncomingDialog />
   <PairingDialog />
+  <LinkShareDialog />
   <Toast />
 {/if}
 

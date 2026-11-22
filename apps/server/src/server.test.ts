@@ -3,6 +3,7 @@ import { normalizeIpToGroup } from './ip-group.js';
 import { parseUserAgent, assignUniqueDisplayName } from './ua-name.js';
 import { StateDatabase, getWitaDateAndNextReset } from './db.js';
 import { GroupManager } from './group-manager.js';
+import { createR2PresignedUrl } from './r2.js';
 
 describe('ip-group (D1 & D2)', () => {
   it('menormalisasi IPv4 dan IPv6 prefix /64 ke grup yang sama', () => {
@@ -51,6 +52,43 @@ describe('StateDatabase (kuota WITA & pairing)', () => {
     expect(db.getQuotaStatus('103.1.2.3', beforeMidnight).remaining).toBe(6);
     // Setelah lewat 00:00 WITA kembali ke 10
     expect(db.getQuotaStatus('103.1.2.3', afterMidnight).remaining).toBe(10);
+
+    // Kuota Link 5 GB: maks 3 link/hari/IP
+    expect(db.getLinkQuotaStatus('103.1.2.3', beforeMidnight).remaining).toBe(3);
+    db.incrementLinksCreated('103.1.2.3', beforeMidnight);
+    expect(db.getLinkQuotaStatus('103.1.2.3', beforeMidnight).remaining).toBe(2);
+    expect(db.getLinkQuotaStatus('103.1.2.3', afterMidnight).remaining).toBe(3);
+
+    // Shared link record + TTL 6 jam
+    const rec = db.createSharedLinkRecord({
+      linkId: 'abc12345',
+      objectKey: 'links/abc12345/video.mp4',
+      uploadId: 'up-1',
+      fileName: 'video.mp4',
+      fileSize: 1024 * 1024,
+      mimeType: 'video/mp4',
+      senderIp: '103.1.2.3',
+      nowMs: beforeMidnight,
+    });
+    expect(rec.status).toBe('uploading');
+    db.markSharedLinkReady('abc12345');
+    expect(db.getSharedLink('abc12345')?.status).toBe('ready');
+
+    const url = createR2PresignedUrl({
+      config: {
+        accountId: 'acc123',
+        accessKeyId: 'key123',
+        secretAccessKey: 'sec123',
+        bucketName: 'bagas-share',
+      },
+      method: 'PUT',
+      objectKey: rec.objectKey,
+      expiresInSec: 3600,
+      queryParams: { partNumber: '1', uploadId: 'up-1' },
+    });
+    expect(url).toContain('acc123.r2.cloudflarestorage.com/bagas-share/links/abc12345/video.mp4');
+    expect(url).toContain('X-Amz-Signature=');
+
     db.close();
   });
 

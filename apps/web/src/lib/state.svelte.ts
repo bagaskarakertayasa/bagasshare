@@ -104,8 +104,20 @@ class AppState {
   isNotFoundRoute = $state<boolean>(
     typeof window !== 'undefined' &&
       window.location.pathname !== '/' &&
-      window.location.pathname !== '/index.html'
+      window.location.pathname !== '/index.html' &&
+      !window.location.pathname.startsWith('/d/')
   );
+
+  downloadLinkId = $state<string | null>(
+    typeof window !== 'undefined' && window.location.pathname.startsWith('/d/')
+      ? window.location.pathname.slice(3).split('/')[0] || null
+      : null
+  );
+
+  // Dialog Buat Link 5 GB (Cloudflare R2)
+  linkDialogOpen = $state<boolean>(false);
+  linkQuotaRemaining = $state<number>(3);
+  linkR2Enabled = $state<boolean>(true);
 
   // Koneksi & Identitas
   connectionState = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
@@ -177,7 +189,8 @@ class AppState {
 
   init(): void {
     saveLocale(this.locale);
-    if (!this.webrtcSupported || this.isNotFoundRoute) return;
+    this.fetchLinkQuota();
+    if (!this.webrtcSupported || this.isNotFoundRoute || this.downloadLinkId) return;
 
     window.addEventListener('online', () => {
       this.browserOffline = false;
@@ -880,6 +893,31 @@ class AppState {
     this.pairingLoading = true;
     this.pairingError = null;
     this.signaling?.send({ type: 'pair:join', code });
+  }
+
+  async fetchLinkQuota(): Promise<void> {
+    try {
+      const res = await fetch('/api/links/quota');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          enabled: boolean;
+          remaining: number;
+        };
+        this.linkR2Enabled = data.enabled;
+        this.linkQuotaRemaining = data.remaining;
+      }
+    } catch {
+      // abaikan
+    }
+  }
+
+  openLinkDialog(): void {
+    this.fetchLinkQuota();
+    this.linkDialogOpen = true;
+  }
+
+  closeLinkDialog(): void {
+    this.linkDialogOpen = false;
   }
 }
 

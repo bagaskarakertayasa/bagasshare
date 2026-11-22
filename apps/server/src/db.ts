@@ -7,6 +7,8 @@ import { dirname } from 'node:path';
 import { randomInt, randomUUID } from 'node:crypto';
 import {
   DAILY_FILE_QUOTA,
+  LINK_DAILY_QUOTA_PER_IP,
+  LINK_TTL_MS,
   PAIRING_TTL_MS,
   PAIRING_MAX_FAILS_PER_HOUR,
   PAIRING_BLOCK_WINDOW_MS,
@@ -50,6 +52,19 @@ export interface PairingRedeemResult {
   pairToken?: string;
 }
 
+export interface SharedLinkRecord {
+  linkId: string;
+  objectKey: string;
+  uploadId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  senderIp: string;
+  status: 'uploading' | 'ready' | 'deleted';
+  createdAt: number;
+  expiresAt: number;
+}
+
 export class StateDatabase {
   private db: DatabaseSyncType;
 
@@ -69,6 +84,28 @@ export class StateDatabase {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (ip, date_wita)
       );
+
+      CREATE TABLE IF NOT EXISTS daily_link_quota (
+        ip TEXT NOT NULL,
+        date_wita TEXT NOT NULL,
+        links_created INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (ip, date_wita)
+      );
+
+      CREATE TABLE IF NOT EXISTS shared_links (
+        link_id TEXT PRIMARY KEY,
+        object_key TEXT NOT NULL,
+        upload_id TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        mime_type TEXT NOT NULL,
+        sender_ip TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'uploading',
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_shared_links_expires ON shared_links(expires_at);
 
       CREATE TABLE IF NOT EXISTS pairing_codes (
         code TEXT PRIMARY KEY,
@@ -289,11 +326,174 @@ export class StateDatabase {
     return { ok: false, reason };
   }
 
+  getLinkQuotaStatus(ip: string, nowMs: number = Date.now()): {
+    remaining: number;
+    resetAt: string;
+  } {
+    const { dateWita, nextResetIso } = getWitaDateAndNextReset(nowMs);
+    const row = this.db
+      .prepare(
+        'SELECT links_created FROM daily_link_quota WHERE ip = ? AND date_wita = ?'
+      )
+      .get(ip, dateWita) as { links_created: number } | undefined;
+    const used = row ? Number(row.links_created) : 0;
+    return {
+      remaining: Math.max(0, LINK_DAILY_QUOTA_PER_IP - used),
+      resetAt: nextResetIso,
+    };
+  }
+
+  incrementLinksCreated(
+    ip: string,
+    nowMs: number = Date.now()
+  ): { remaining: number; resetAt: string } {
+    const { dateWita } = getWitaDateAndNextReset(nowMs);
+    this.db
+      .prepare(
+        `INSERT INTO daily_link_quota (ip, date_wita, links_created, updated_at)
+         VALUES (?, ?, 1, ?)
+         ON CONFLICT(ip, date_wita) DO UPDATE SET
+           links_created = links_created + 1,
+           updated_at = excluded.updated_at`
+      )
+      .run(ip, dateWita, nowMs);
+    return this.getLinkQuotaStatus(ip, nowMs);
+  }
+
+  createSharedLinkRecord(params: {
+    linkId: string;
+    objectKey: string;
+    uploadId: string;
+    fileName: string;
+    fileSize: number;
+    mimeType: string;
+    senderIp: string;
+    nowMs?: number;
+  }): SharedLinkRecord {
+    const nowMs = params.nowMs ?? Date.now();
+    const expiresAt = nowMs + LINK_TTL_MS;
+    this.db
+      .prepare(
+        `INSERT INTO shared_links (
+          link_id, object_key, upload_id, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)`
+      )
+      .run(
+        params.linkId,
+        params.objectKey,
+        params.uploadId,
+        params.fileName,
+        params.fileSize,
+        params.mimeType,
+        params.senderIp,
+        nowMs,
+        expiresAt
+      );
+    return {
+      linkId: params.linkId,
+      objectKey: params.objectKey,
+      uploadId: params.uploadId,
+      fileName: params.fileName,
+      fileSize: params.fileSize,
+      mimeType: params.mimeType,
+      senderIp: params.senderIp,
+      status: 'uploading',
+      createdAt: nowMs,
+      expiresAt,
+    };
+  }
+
+  getSharedLink(linkId: string): SharedLinkRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT link_id, object_key, upload_id, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
+         FROM shared_links WHERE link_id = ?`
+      )
+      .get(linkId) as
+      | {
+          link_id: string;
+          object_key: string;
+          upload_id: string;
+          file_name: string;
+          file_size: number;
+          mime_type: string;
+          sender_ip: string;
+          status: 'uploading' | 'ready' | 'deleted';
+          created_at: number;
+          expires_at: number;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      linkId: row.link_id,
+      objectKey: row.object_key,
+      uploadId: row.upload_id,
+      fileName: row.file_name,
+      fileSize: Number(row.file_size),
+      mimeType: row.mime_type,
+      senderIp: row.sender_ip,
+      status: row.status,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+    };
+  }
+
+  markSharedLinkReady(linkId: string): void {
+    this.db
+      .prepare(`UPDATE shared_links SET status = 'ready' WHERE link_id = ?`)
+      .run(linkId);
+  }
+
+  markSharedLinkDeleted(linkId: string): void {
+    this.db
+      .prepare(`UPDATE shared_links SET status = 'deleted' WHERE link_id = ?`)
+      .run(linkId);
+  }
+
+  getExpiredSharedLinks(nowMs: number = Date.now()): SharedLinkRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT link_id, object_key, upload_id, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
+         FROM shared_links WHERE expires_at < ? AND status != 'deleted'`
+      )
+      .all(nowMs) as Array<{
+      link_id: string;
+      object_key: string;
+      upload_id: string;
+      file_name: string;
+      file_size: number;
+      mime_type: string;
+      sender_ip: string;
+      status: 'uploading' | 'ready' | 'deleted';
+      created_at: number;
+      expires_at: number;
+    }>;
+
+    return rows.map((r) => ({
+      linkId: r.link_id,
+      objectKey: r.object_key,
+      uploadId: r.upload_id,
+      fileName: r.file_name,
+      fileSize: Number(r.file_size),
+      mimeType: r.mime_type,
+      senderIp: r.sender_ip,
+      status: r.status,
+      createdAt: Number(r.created_at),
+      expiresAt: Number(r.expires_at),
+    }));
+  }
+
   cleanupExpired(nowMs: number = Date.now()): void {
     const { dateWita } = getWitaDateAndNextReset(nowMs - 2 * 86_400_000);
     this.db.prepare('DELETE FROM daily_quota WHERE date_wita < ?').run(dateWita);
+    this.db.prepare('DELETE FROM daily_link_quota WHERE date_wita < ?').run(dateWita);
     this.db.prepare('DELETE FROM pairing_codes WHERE expires_at < ?').run(nowMs);
     this.db.prepare('DELETE FROM active_pair_tokens WHERE expires_at < ?').run(nowMs);
+    this.db
+      .prepare(
+        `DELETE FROM shared_links WHERE expires_at < ? AND status = 'deleted'`
+      )
+      .run(nowMs - 86_400_000);
     this.db
       .prepare(
         'DELETE FROM pairing_attempts WHERE window_start_at < ? AND blocked_until < ?'

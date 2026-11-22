@@ -1,10 +1,44 @@
-import { CHUNK_HEADER_BYTES } from './constants.js';
 import {
+  CHUNK_HEADER_BYTES,
   MAX_FILE_SIZE_BYTES,
   MAX_TOTAL_SIZE_BYTES,
+  LINK_MAX_FILE_SIZE_BYTES,
 } from './constants.js';
 import { getBlockedExtension } from './blocked-ext.js';
 import type { TransferFileMeta } from './protocol.js';
+
+export interface LinkFileValidationResult {
+  valid: boolean;
+  reason?: 'empty' | 'too_large' | 'blocked_extension' | 'quota_exceeded';
+  blockedExtension?: string;
+}
+
+/**
+ * Validasi 1 file untuk Fitur Berbagi Link 5 GB (Cloudflare R2).
+ */
+export function validateLinkFile(
+  file: { name: string; size: number },
+  linkQuotaRemaining: number
+): LinkFileValidationResult {
+  if (linkQuotaRemaining <= 0) {
+    return { valid: false, reason: 'quota_exceeded' };
+  }
+  if (file.size <= 0) {
+    return { valid: false, reason: 'empty' };
+  }
+  if (file.size > LINK_MAX_FILE_SIZE_BYTES) {
+    return { valid: false, reason: 'too_large' };
+  }
+  const blocked = getBlockedExtension(file.name);
+  if (blocked) {
+    return {
+      valid: false,
+      reason: 'blocked_extension',
+      blockedExtension: blocked,
+    };
+  }
+  return { valid: true };
+}
 
 export interface FileValidationIssue {
   fileId: string;

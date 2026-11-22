@@ -18,3 +18,11 @@ export const PAIRING_BLOCK_WINDOW_MS = 60 * 60 * 1000; // 1 jam
 export const SIGNALING_CONN_RATE_PER_MIN = 30; // PRD FR12.5
 export const DATA_CHANNEL_NAME = 'bagas-share-v1';
 export const QUOTA_TIMEZONE = 'Asia/Makassar'; // WITA UTC+8 (PRD FR12.4)
+
+// Konstanta Fitur Berbagi Link 5 GB (Cloudflare R2)
+export const LINK_MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB per link
+export const LINK_DAILY_QUOTA_PER_IP = 3; // Maksimal 3 link / hari / IP
+export const LINK_TTL_MS = 6 * 60 * 60 * 1000; // 6 jam (1x unduh atau 6 jam, mana yang lebih dulu)
+export const LINK_MULTIPART_CHUNK_BYTES = 50 * 1024 * 1024; // 50 MiB per part (maks 100 part untuk 5 GiB)
+export const LINK_PARALLEL_UPLOADS = 4; // 4 koneksi paralel saat upload ke R2
+

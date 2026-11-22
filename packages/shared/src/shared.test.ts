@@ -4,10 +4,12 @@ import {
   isBlockedFilename,
   sanitizeFilename,
   validateTransferFiles,
+  validateLinkFile,
   encodeChunkFrame,
   decodeChunkFrame,
   MAX_FILE_SIZE_BYTES,
   MAX_TOTAL_SIZE_BYTES,
+  LINK_MAX_FILE_SIZE_BYTES,
 } from './index.js';
 
 describe('blocked-ext', () => {
@@ -61,6 +63,22 @@ describe('validateTransferFiles', () => {
     );
     expect(r4.exceedsQuota).toBe(true);
     expect(r4.valid).toBe(false);
+  });
+
+  it('validateLinkFile menerima file hingga 5 GiB dan menolak > 5 GiB atau kuota habis', () => {
+    expect(
+      validateLinkFile({ name: 'video-4k.mp4', size: LINK_MAX_FILE_SIZE_BYTES }, 3).valid
+    ).toBe(true);
+    expect(
+      validateLinkFile({ name: 'terlalu-besar.iso', size: LINK_MAX_FILE_SIZE_BYTES + 1 }, 3)
+        .reason
+    ).toBe('too_large');
+    expect(
+      validateLinkFile({ name: 'dokumen.pdf', size: 1024 }, 0).reason
+    ).toBe('quota_exceeded');
+    expect(
+      validateLinkFile({ name: 'malware.exe', size: 1024 }, 3).reason
+    ).toBe('blocked_extension');
   });
 });
 

@@ -7,6 +7,8 @@ import { StateDatabase } from './db.js';
 import { GroupManager } from './group-manager.js';
 import { TransferManager } from './transfer-manager.js';
 import { SignalingHandler } from './ws-handler.js';
+import { registerLinkRoutes } from './link-routes.js';
+import { r2DeleteObject } from './r2.js';
 
 const MIME_MAP: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -29,6 +31,8 @@ export async function createServer(customConfig?: Partial<ServerConfig>) {
   const app = Fastify({ logger: false });
 
   app.get('/healthz', async () => ({ status: 'ok' }));
+
+  registerLinkRoutes(app, db, config.r2, config.trustProxy);
 
   if (config.staticDir && existsSync(config.staticDir)) {
     const root = config.staticDir;
@@ -65,7 +69,14 @@ export async function createServer(customConfig?: Partial<ServerConfig>) {
     }
   }, 3_000);
 
-  const cleanupTimer = setInterval(() => {
+  const cleanupTimer = setInterval(async () => {
+    const expiredLinks = db.getExpiredSharedLinks();
+    for (const item of expiredLinks) {
+      if (config.r2) {
+        await r2DeleteObject(config.r2, item.objectKey);
+      }
+      db.markSharedLinkDeleted(item.linkId);
+    }
     db.cleanupExpired();
   }, 10 * 60_000);
 
