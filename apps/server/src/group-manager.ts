@@ -252,6 +252,17 @@ export class GroupManager {
   pruneStaleDevices(nowMs: number = Date.now()): string[] {
     const removed: string[] = [];
     for (const [deviceId, dev] of this.devices) {
+      // Jika socket masih terbuka (readyState === 1), kirim ping dan perbarui heartbeat
+      if (dev.ws && dev.ws.readyState === 1) {
+        try {
+          dev.ws.ping();
+        } catch {
+          // abaikan
+        }
+        if (nowMs - dev.lastHeartbeatAt <= OFFLINE_TIMEOUT_MS * 2) {
+          continue;
+        }
+      }
       if (nowMs - dev.lastHeartbeatAt > OFFLINE_TIMEOUT_MS) {
         if (dev.ws) {
           try {

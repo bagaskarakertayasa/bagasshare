@@ -188,6 +188,29 @@ export class SignalingHandler {
         );
         return;
       }
+
+      case 'transfer:cloud-progress': {
+        this.transfers.relayCloudProgress({
+          fromDeviceId: deviceId,
+          targetDeviceId: msg.targetDeviceId,
+          transferId: msg.transferId,
+          fileId: msg.fileId,
+          bytesUploaded: Number(msg.bytesUploaded) || 0,
+        });
+        return;
+      }
+
+      case 'transfer:cloud-ready': {
+        this.transfers.relayCloudReady({
+          fromDeviceId: deviceId,
+          targetDeviceId: msg.targetDeviceId,
+          transferId: msg.transferId,
+          fileId: msg.fileId,
+          linkId: msg.linkId,
+          shareUrl: msg.shareUrl,
+        });
+        return;
+      }
     }
   }
 }

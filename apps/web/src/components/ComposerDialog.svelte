@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { MAX_TOTAL_SIZE_BYTES } from '@bagas-share/shared';
+  import {
+    MAX_FILE_SIZE_BYTES,
+    MAX_TOTAL_SIZE_BYTES,
+    LINK_MAX_FILE_SIZE_BYTES,
+  } from '@bagas-share/shared';
   import { formatBytes } from '../lib/i18n/index.js';
   import { appState } from '../lib/state.svelte.js';
   import DeviceSilhouette from './DeviceSilhouette.svelte';
@@ -8,7 +12,7 @@
   let dialogTitleEl = $state<HTMLHeadingElement | null>(null);
 
   $effect(() => {
-    if (appState.composerTarget && dialogTitleEl) {
+    if (appState.composerOpen && dialogTitleEl) {
       dialogTitleEl.focus();
     }
   });
@@ -17,17 +21,33 @@
   const totalValidBytes = $derived(
     validFiles.reduce((acc, f) => acc + f.size, 0)
   );
-  const exceedsTotal = $derived(totalValidBytes > MAX_TOTAL_SIZE_BYTES);
-  const exceedsQuota = $derived(validFiles.length > appState.quotaRemaining);
+  const hasCloudFile = $derived(
+    validFiles.some((f) => f.size > MAX_FILE_SIZE_BYTES)
+  );
+  const hasBelow500WithoutTarget = $derived(
+    !appState.composerTarget &&
+      validFiles.some((f) => f.size <= MAX_FILE_SIZE_BYTES)
+  );
+  const maxAllowedTotal = $derived(
+    hasCloudFile ? LINK_MAX_FILE_SIZE_BYTES : MAX_TOTAL_SIZE_BYTES
+  );
+  const activeQuotaRemaining = $derived(
+    hasCloudFile || !appState.composerTarget
+      ? appState.linkQuotaRemaining
+      : appState.quotaRemaining
+  );
+  const exceedsTotal = $derived(totalValidBytes > maxAllowedTotal);
+  const exceedsQuota = $derived(validFiles.length > activeQuotaRemaining);
   const canSend = $derived(
     validFiles.length > 0 &&
       !exceedsTotal &&
       !exceedsQuota &&
+      !hasBelow500WithoutTarget &&
       !appState.composerHashing
   );
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && appState.composerTarget) {
+    if (e.key === 'Escape' && appState.composerOpen) {
       appState.closeComposer();
     }
   }
@@ -43,7 +63,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if appState.composerTarget}
+{#if appState.composerOpen}
   {@const target = appState.composerTarget}
   <div class="dialog-backdrop">
     <div
@@ -55,10 +75,16 @@
     >
       <div class="dialog-header">
         <div class="target-title">
-          <DeviceSilhouette kind={target.kind} slot={target.colorSlot} size={32} />
-          <h2 id="composer-dialog-title" bind:this={dialogTitleEl} tabindex="-1">
-            {appState.t('composerTitle', { name: target.displayName })}
-          </h2>
+          {#if target}
+            <DeviceSilhouette kind={target.kind} slot={target.colorSlot} size={32} />
+            <h2 id="composer-dialog-title" bind:this={dialogTitleEl} tabindex="-1">
+              {appState.t('composerTitle', { name: target.displayName })}
+            </h2>
+          {:else}
+            <h2 id="composer-dialog-title" bind:this={dialogTitleEl} tabindex="-1">
+              {appState.t('composerTitleLinkOnly')}
+            </h2>
+          {/if}
         </div>
         <button
           type="button"
@@ -131,13 +157,21 @@
           })}
         </p>
         <p class="quota-line tabular">
-          {appState.t('composerQuotaNote', {
-            remaining: appState.quotaRemaining,
-          })}
+          {#if hasCloudFile || !target}
+            {appState.t('linkQuotaNote', {
+              remaining: appState.linkQuotaRemaining,
+            })}
+          {:else}
+            {appState.t('composerQuotaNote', {
+              remaining: appState.quotaRemaining,
+            })}
+          {/if}
         </p>
 
         {#if validFiles.length === 0}
           <p class="error-line">{appState.t('composerErrNoneValid')}</p>
+        {:else if hasBelow500WithoutTarget}
+          <p class="error-line">{appState.t('errBelow500WithoutPeer')}</p>
         {:else if exceedsTotal}
           <p class="error-line">
             {appState.t('composerErrTotalLimit', {
@@ -147,9 +181,9 @@
         {:else if exceedsQuota}
           <p class="error-line">
             {appState.t('composerErrQuota', {
-              remaining: appState.quotaRemaining,
+              remaining: activeQuotaRemaining,
               selected: validFiles.length,
-              diff: validFiles.length - appState.quotaRemaining,
+              diff: validFiles.length - activeQuotaRemaining,
             })}
           </p>
         {/if}
@@ -169,7 +203,11 @@
           disabled={!canSend}
           onclick={() => appState.confirmComposerSend()}
         >
-          {appState.t('sendFilesBtn', { count: validFiles.length })}
+          {#if target}
+            {appState.t('sendFilesBtn', { count: validFiles.length })}
+          {:else}
+            {appState.t('createAutoLinkBtn', { count: validFiles.length })}
+          {/if}
         </button>
       </div>
     </div>

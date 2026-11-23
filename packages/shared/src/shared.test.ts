@@ -33,17 +33,24 @@ describe('blocked-ext', () => {
 });
 
 describe('validateTransferFiles', () => {
-  it('menolak file 0 byte, > 500 MB, total > 1 GB, dan kuota kurang', () => {
+  it('menolak file 0 byte, > 5 GB, total > batas, dan kuota kurang; file > 500 MB memakai cloud link', () => {
     const r1 = validateTransferFiles([{ fileId: '1', name: 'a.txt', size: 0 }], 5);
     expect(r1.valid).toBe(false);
     expect(r1.fileIssues[0]?.reason).toBe('empty');
 
-    const r2 = validateTransferFiles(
+    const rCloud = validateTransferFiles(
       [{ fileId: '1', name: 'besar.zip', size: MAX_FILE_SIZE_BYTES + 1 }],
       5
     );
-    expect(r2.valid).toBe(false);
-    expect(r2.fileIssues[0]?.reason).toBe('too_large');
+    expect(rCloud.valid).toBe(true);
+    expect(rCloud.usesCloudLink).toBe(true);
+
+    const rTooLarge = validateTransferFiles(
+      [{ fileId: '1', name: 'raksasa.iso', size: LINK_MAX_FILE_SIZE_BYTES + 1 }],
+      5
+    );
+    expect(rTooLarge.valid).toBe(false);
+    expect(rTooLarge.fileIssues[0]?.reason).toBe('too_large');
 
     const eleven = Array.from({ length: 11 }, (_, i) => ({
       fileId: String(i),

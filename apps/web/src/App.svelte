@@ -8,14 +8,42 @@
   import ComposerDialog from './components/ComposerDialog.svelte';
   import IncomingDialog from './components/IncomingDialog.svelte';
   import PairingDialog from './components/PairingDialog.svelte';
-  import LinkShareDialog from './components/LinkShareDialog.svelte';
   import LinkDownloadView from './components/LinkDownloadView.svelte';
   import Toast from './components/Toast.svelte';
+
+  let standaloneFileInput = $state<HTMLInputElement | null>(null);
+
+  function handleStandaloneFiles(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      appState.openComposerWithFiles(null, input.files);
+      input.value = '';
+    }
+  }
+
+  function handleWindowDrop(e: DragEvent) {
+    if (appState.composerOpen || appState.incomingRequest || appState.pairingOpen) {
+      return;
+    }
+    const targetEl = e.target as HTMLElement | null;
+    if (targetEl?.closest('.device-tile')) {
+      return;
+    }
+    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+      e.preventDefault();
+      appState.openComposerWithFiles(null, e.dataTransfer.files);
+    }
+  }
 
   onMount(() => {
     appState.init();
   });
 </script>
+
+<svelte:window
+  ondragover={(e) => e.preventDefault()}
+  ondrop={handleWindowDrop}
+/>
 
 {#if !appState.webrtcSupported}
   <!-- S10: Browser tidak didukung -->
@@ -37,7 +65,6 @@
 {:else if appState.downloadLinkId}
   <AppBar />
   <LinkDownloadView linkId={appState.downloadLinkId} />
-  <LinkShareDialog />
   <PairingDialog />
   <Toast />
 {:else}
@@ -61,7 +88,6 @@
             selfName: appState.selfDisplayName || 'Anda',
           })}
         </p>
-        <p class="keep-open-note tabular">{appState.t('transferLimitsNote')}</p>
         <p class="keep-open-note">{appState.t('keepTabOpenNote')}</p>
       {:else}
         <p class="subtitle">
@@ -69,7 +95,6 @@
             selfName: appState.selfDisplayName || 'Anda',
           })}
         </p>
-        <p class="keep-open-note tabular">{appState.t('transferLimitsNote')}</p>
       {/if}
 
       <p class="mobile-quota tabular">
@@ -86,6 +111,16 @@
       {appState.liveAnnouncement}
     </div>
 
+    <input
+      bind:this={standaloneFileInput}
+      type="file"
+      multiple
+      hidden
+      class="sr-only"
+      tabindex="-1"
+      onchange={handleStandaloneFiles}
+    />
+
     {#if appState.connectionState === 'connecting' && !appState.selfDisplayName}
       <!-- State Loading: satu petak skeleton datar -->
       <div class="device-grid">
@@ -98,17 +133,35 @@
           <DeviceTile {peer} />
         {/each}
       </ul>
+      <div class="standalone-link-bar">
+        <button
+          type="button"
+          class="btn btn-secondary"
+          onclick={() => standaloneFileInput?.click()}
+        >
+          {appState.t('directUploadLinkBtn')}
+        </button>
+      </div>
     {:else}
       <!-- State Empty: belum ada device lain (O-D6 menulis bagasshare.web.id) -->
       <div class="empty-block">
         <p class="empty-text">{appState.t('emptyDescription')}</p>
-        <button
-          type="button"
-          class="btn btn-primary"
-          onclick={() => appState.openPairingDialog('enter')}
-        >
-          {appState.t('usePairingBtn')}
-        </button>
+        <div class="empty-actions">
+          <button
+            type="button"
+            class="btn btn-primary"
+            onclick={() => appState.openPairingDialog('enter')}
+          >
+            {appState.t('usePairingBtn')}
+          </button>
+          <button
+            type="button"
+            class="btn btn-secondary"
+            onclick={() => standaloneFileInput?.click()}
+          >
+            {appState.t('directUploadLinkBtn')}
+          </button>
+        </div>
       </div>
     {/if}
 
@@ -118,7 +171,6 @@
   <ComposerDialog />
   <IncomingDialog />
   <PairingDialog />
-  <LinkShareDialog />
   <Toast />
 {/if}
 
@@ -167,9 +219,27 @@
     max-width: 65ch;
   }
 
+  .empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  .standalone-link-bar {
+    margin-top: var(--space-4);
+  }
+
   @media (max-width: 639px) {
     .mobile-quota {
       display: block;
+    }
+    .empty-actions {
+      width: 100%;
+      flex-direction: column;
+    }
+    .empty-actions .btn,
+    .standalone-link-bar .btn {
+      width: 100%;
     }
   }
 </style>

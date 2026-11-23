@@ -36,14 +36,6 @@
       <button
         type="button"
         class="btn btn-secondary"
-        onclick={() => appState.openLinkDialog()}
-      >
-        {appState.t('createLinkBtn')}
-      </button>
-
-      <button
-        type="button"
-        class="btn btn-secondary"
         onclick={() => appState.openPairingDialog('create')}
       >
         {appState.t('pairingBtn')}

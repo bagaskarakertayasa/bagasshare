@@ -1,6 +1,8 @@
 import {
   CHUNK_SIZE_BYTES,
   DAILY_FILE_QUOTA,
+  LINK_PARALLEL_UPLOADS,
+  MAX_FILE_SIZE_BYTES,
   sanitizeFilename,
   validateTransferFiles,
   type ColorSlot,
@@ -53,6 +55,9 @@ export interface TransferFileRow {
   status: 'waiting' | 'transferring' | 'done' | 'failed';
   downloadUrl?: string;
   downloaded?: boolean;
+  cloudLinkId?: string;
+  cloudShareUrl?: string;
+  copied?: boolean;
 }
 
 export interface TransferRowItem {
@@ -114,11 +119,6 @@ class AppState {
       : null
   );
 
-  // Dialog Buat Link 5 GB (Cloudflare R2)
-  linkDialogOpen = $state<boolean>(false);
-  linkQuotaRemaining = $state<number>(3);
-  linkR2Enabled = $state<boolean>(true);
-
   // Koneksi & Identitas
   connectionState = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
   browserOffline = $state<boolean>(
@@ -133,12 +133,14 @@ class AppState {
   // Kuota Harian
   quotaRemaining = $state<number>(DAILY_FILE_QUOTA);
   quotaResetAt = $state<string>('');
+  linkQuotaRemaining = $state<number>(3);
 
   // Daftar Peer
   peers = $state<PeerInfo[]>([]);
   liveAnnouncement = $state<string>('');
 
   // Composer (S2)
+  composerOpen = $state<boolean>(false);
   composerTarget = $state<PeerInfo | null>(null);
   composerFiles = $state<ComposerCandidateFile[]>([]);
   composerHashing = $state<boolean>(false);
@@ -439,7 +441,7 @@ class AppState {
 
         if (msg.status === 'accepted' && row && row.role === 'sender') {
           row.state = 'connecting';
-          this.startSenderRtc(row);
+          this.startSenderTransfer(row);
         } else if (msg.status === 'rejected' && row) {
           row.state = 'rejected';
           this.saveSenderResumeSession(null);
@@ -492,13 +494,54 @@ class AppState {
         this.quotaResetAt = msg.quotaResetAt;
         break;
       }
+
+      case 'transfer:cloud-progress': {
+        const row = this.transfers.find((r) => r.transferId === msg.transferId);
+        if (row) {
+          row.state = 'transferring';
+          const f = row.files.find((x) => x.fileId === msg.fileId);
+          if (f) {
+            f.bytesTransferred = msg.bytesUploaded;
+            f.status = 'transferring';
+          }
+        }
+        break;
+      }
+
+      case 'transfer:cloud-ready': {
+        const row = this.transfers.find((r) => r.transferId === msg.transferId);
+        if (row) {
+          const f = row.files.find((x) => x.fileId === msg.fileId);
+          if (f) {
+            f.bytesTransferred = f.size;
+            f.status = 'done';
+            f.cloudLinkId = msg.linkId;
+            f.cloudShareUrl = msg.shareUrl;
+            f.downloadUrl = msg.shareUrl;
+          }
+          if (row.files.every((x) => x.status === 'done')) {
+            row.state = 'completed';
+            this.signaling?.send({
+              type: 'transfer:complete',
+              transferId: row.transferId,
+              filesReceived: row.files.length,
+            });
+          }
+        }
+        break;
+      }
     }
   }
 
   // Composer Actions (S2)
-  openComposerWithFiles(peer: PeerInfo, fileList: FileList | File[]): void {
-    if (this.quotaRemaining <= 0 || peer.busy) return;
+  openComposerWithFiles(
+    peer: PeerInfo | null,
+    fileList: FileList | File[]
+  ): void {
+    if (peer && (this.quotaRemaining <= 0 || peer.busy)) return;
+    this.fetchLinkQuota();
     this.composerTarget = peer;
+    this.composerOpen = true;
     this.composerFiles = [];
     this.addFilesToComposer(fileList);
   }
@@ -527,18 +570,19 @@ class AppState {
   removeComposerFile(fileId: string): void {
     this.composerFiles = this.composerFiles.filter((f) => f.fileId !== fileId);
     if (this.composerFiles.length === 0) {
-      this.composerTarget = null;
+      this.closeComposer();
     }
   }
 
   closeComposer(): void {
+    this.composerOpen = false;
     this.composerTarget = null;
     this.composerFiles = [];
   }
 
   async confirmComposerSend(): Promise<void> {
     const target = this.composerTarget;
-    if (!target || this.composerHashing) return;
+    if (!this.composerOpen || this.composerHashing) return;
     const validCandidates = this.composerFiles.filter((f) => !f.issue);
     if (
       validCandidates.length === 0 ||
@@ -547,48 +591,105 @@ class AppState {
       return;
     }
 
+    // Pisahkan file <= 500 MB (P2P) dan file > 500 MB (Cloudflare R2 Link otomatis)
+    const p2pCandidates = validCandidates.filter(
+      (c) => c.size <= MAX_FILE_SIZE_BYTES
+    );
+    const cloudCandidates = validCandidates.filter(
+      (c) => c.size > MAX_FILE_SIZE_BYTES
+    );
+
+    // Jika tidak ada peer penerima yang dipilih, semua file harus > 500 MB
+    if (!target && p2pCandidates.length > 0) {
+      this.addToast(this.t('errBelow500WithoutPeer'), 'error');
+      return;
+    }
+
     this.composerHashing = true;
     try {
-      const senderItems: SenderFileItem[] = [];
-      for (const c of validCandidates) {
-        const sha256 = await computeFileSha256Hex(c.file);
-        senderItems.push({
+      this.closeComposer();
+
+      // 1. Semua file > 500 MB LANGSUNG di-upload ke Cloudflare R2 & dibuatkan link otomatis
+      // TANPA harus menunggu penerima menekan Terima atau terkoneksi P2P!
+      if (cloudCandidates.length > 0) {
+        const cloudTransferId =
+          'cloud_' + Math.random().toString(36).slice(2, 10);
+        const cloudItems: SenderFileItem[] = cloudCandidates.map((c) => ({
           file: c.file,
           meta: {
             fileId: c.fileId,
             name: c.name,
             size: c.size,
             mimeType: c.mimeType,
-            sha256,
+            sha256: 'cloud-r2-' + c.fileId,
           },
-        });
+        }));
+
+        const cloudRow: TransferRowItem = {
+          transferId: cloudTransferId,
+          role: 'sender',
+          peerDeviceId: target ? target.deviceId : '',
+          peerDisplayName: target
+            ? target.displayName
+            : this.t('cloudLinkRowPeerName'),
+          peerColorSlot: target ? target.colorSlot : 4,
+          state: 'transferring',
+          expanded: true,
+          files: cloudItems.map((s) => ({
+            ...s.meta,
+            bytesTransferred: 0,
+            status: 'transferring',
+          })),
+        };
+
+        this.transfers.unshift(cloudRow);
+        const reactiveCloudRow = this.transfers[0]!;
+        // Jalankan upload R2 langsung di background pada objek proxy reaktif Svelte 5
+        this.runCloudFilesUpload(reactiveCloudRow, cloudItems);
       }
 
-      const localRow: TransferRowItem = {
-        transferId: 'pending_local',
-        role: 'sender',
-        peerDeviceId: target.deviceId,
-        peerDisplayName: target.displayName,
-        peerColorSlot: target.colorSlot,
-        state: 'waiting_approval',
-        expiresAtMs: Date.now() + 60_000,
-        expanded: true,
-        files: senderItems.map((s) => ({
-          ...s.meta,
-          bytesTransferred: 0,
-          status: 'waiting',
-        })),
-      };
+      // 2. Jika ada file <= 500 MB dan ada target device, jalankan alur P2P seperti biasa
+      if (target && p2pCandidates.length > 0) {
+        const senderItems: SenderFileItem[] = [];
+        for (const c of p2pCandidates) {
+          const sha256 = await computeFileSha256Hex(c.file);
+          senderItems.push({
+            file: c.file,
+            meta: {
+              fileId: c.fileId,
+              name: c.name,
+              size: c.size,
+              mimeType: c.mimeType,
+              sha256,
+            },
+          });
+        }
 
-      this.transfers.unshift(localRow);
-      this.senderRawFiles.set('pending_local', senderItems);
-      this.closeComposer();
+        const localRow: TransferRowItem = {
+          transferId: 'pending_local',
+          role: 'sender',
+          peerDeviceId: target.deviceId,
+          peerDisplayName: target.displayName,
+          peerColorSlot: target.colorSlot,
+          state: 'waiting_approval',
+          expiresAtMs: Date.now() + 60_000,
+          expanded: true,
+          files: senderItems.map((s) => ({
+            ...s.meta,
+            bytesTransferred: 0,
+            status: 'waiting',
+          })),
+        };
 
-      this.signaling?.send({
-        type: 'transfer:request',
-        targetDeviceId: target.deviceId,
-        files: senderItems.map((s) => s.meta),
-      });
+        this.transfers.unshift(localRow);
+        this.senderRawFiles.set('pending_local', senderItems);
+
+        this.signaling?.send({
+          type: 'transfer:request',
+          targetDeviceId: target.deviceId,
+          files: senderItems.map((s) => s.meta),
+        });
+      }
     } finally {
       this.composerHashing = false;
     }
@@ -675,7 +776,14 @@ class AppState {
     this.transfers.unshift(row);
     this.incomingRequest = null;
 
-    this.startReceiverRtc(req.transferId, req.from, req.files);
+    const hasP2PFile = req.files.some((f) => f.size <= MAX_FILE_SIZE_BYTES);
+    if (hasP2PFile) {
+      this.startReceiverRtc(
+        req.transferId,
+        req.from,
+        req.files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES)
+      );
+    }
     this.signaling?.send({
       type: 'transfer:respond',
       transferId: req.transferId,
@@ -698,12 +806,206 @@ class AppState {
     this.incomingRequest = null;
   }
 
-  private startSenderRtc(row: TransferRowItem): void {
+  private startSenderTransfer(row: TransferRowItem): void {
     const senderFiles = this.senderRawFiles.get(row.transferId) ?? [];
+    const p2pFiles = senderFiles.filter(
+      (s) => s.file.size <= MAX_FILE_SIZE_BYTES
+    );
+    const cloudFiles = senderFiles.filter(
+      (s) => s.file.size > MAX_FILE_SIZE_BYTES
+    );
+
+    if (p2pFiles.length > 0) {
+      this.startSenderRtc(row, p2pFiles);
+    }
+    if (cloudFiles.length > 0) {
+      this.runCloudFilesUpload(row, cloudFiles);
+    }
+  }
+
+  private uploadSinglePartToR2(
+    url: string,
+    slice: Blob,
+    onProgress: (loaded: number) => void
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url, true);
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) onProgress(ev.loaded);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const etag =
+            xhr.getResponseHeader('ETag') ||
+            xhr.getResponseHeader('etag') ||
+            '';
+          if (!etag) {
+            reject(new Error('Missing ETag header'));
+            return;
+          }
+          resolve(etag);
+        } else {
+          reject(new Error(`HTTP ${xhr.status}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(slice);
+    });
+  }
+
+  private async runCloudFilesUpload(
+    row: TransferRowItem,
+    cloudFiles: SenderFileItem[]
+  ): Promise<void> {
+    row.state = 'transferring';
+
+    for (const item of cloudFiles) {
+      if (row.state === 'cancelled') return;
+      const fRow = row.files.find((x) => x.fileId === item.meta.fileId);
+      if (fRow) fRow.status = 'transferring';
+
+      try {
+        const initRes = await fetch('/api/links/init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: item.file.name,
+            fileSize: item.file.size,
+            mimeType: item.file.type || 'application/octet-stream',
+          }),
+        });
+
+        if (!initRes.ok) {
+          const errData = (await initRes.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          if (errData.error === 'r2_not_configured') {
+            this.addToast(this.t('linkErrNotConfigured'), 'error');
+          } else if (errData.error === 'quota_exceeded') {
+            this.addToast(this.t('linkErrQuota'), 'error');
+          } else {
+            this.addToast(this.t('linkErrUploadFailed'), 'error');
+          }
+          if (fRow) fRow.status = 'failed';
+          row.state = 'failed_p2p';
+          return;
+        }
+
+        const initData = (await initRes.json()) as {
+          linkId: string;
+          chunkSize: number;
+          partUrls: Array<{ partNumber: number; url: string }>;
+        };
+
+        const partProgress = new Map<number, number>();
+        const completedParts: Array<{ partNumber: number; etag: string }> = [];
+        const queue = [...initData.partUrls];
+        let lastBroadcastMs = 0;
+
+        const updateProgress = (force = false) => {
+          let sum = 0;
+          for (const v of partProgress.values()) sum += v;
+          const uploaded = Math.min(item.file.size, sum);
+          if (fRow) fRow.bytesTransferred = uploaded;
+
+          const now = Date.now();
+          if (force || now - lastBroadcastMs >= 250) {
+            lastBroadcastMs = now;
+            this.signaling?.send({
+              type: 'transfer:cloud-progress',
+              transferId: row.transferId,
+              targetDeviceId: row.peerDeviceId,
+              fileId: item.meta.fileId,
+              bytesUploaded: uploaded,
+            });
+          }
+        };
+
+        const workers = Array.from(
+          { length: Math.min(LINK_PARALLEL_UPLOADS, queue.length) },
+          async () => {
+            while (queue.length > 0 && row.state !== 'cancelled') {
+              const part = queue.shift();
+              if (!part) break;
+              const start = (part.partNumber - 1) * initData.chunkSize;
+              const end = Math.min(item.file.size, start + initData.chunkSize);
+              const slice = item.file.slice(start, end);
+
+              const etag = await this.uploadSinglePartToR2(
+                part.url,
+                slice,
+                (loaded) => {
+                  partProgress.set(part.partNumber, loaded);
+                  updateProgress(false);
+                }
+              );
+              partProgress.set(part.partNumber, slice.size);
+              updateProgress(true);
+              completedParts.push({ partNumber: part.partNumber, etag });
+            }
+          }
+        );
+
+        await Promise.all(workers);
+        if (row.state === 'cancelled') return;
+
+        const compRes = await fetch(`/api/links/${initData.linkId}/complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ parts: completedParts }),
+        });
+
+        if (!compRes.ok) {
+          throw new Error('Complete failed');
+        }
+
+        const compData = (await compRes.json()) as {
+          linkId: string;
+          quotaRemaining?: number;
+        };
+        if (typeof compData.quotaRemaining === 'number') {
+          this.linkQuotaRemaining = compData.quotaRemaining;
+        }
+        const shareUrl = `${window.location.origin}/d/${initData.linkId}`;
+        if (fRow) {
+          fRow.bytesTransferred = item.file.size;
+          fRow.status = 'done';
+          fRow.cloudLinkId = initData.linkId;
+          fRow.cloudShareUrl = shareUrl;
+        }
+
+        this.signaling?.send({
+          type: 'transfer:cloud-ready',
+          transferId: row.transferId,
+          targetDeviceId: row.peerDeviceId,
+          fileId: item.meta.fileId,
+          linkId: initData.linkId,
+          shareUrl,
+        });
+      } catch {
+        this.addToast(this.t('linkErrUploadFailed'), 'error');
+        if (fRow) fRow.status = 'failed';
+        row.state = 'failed_p2p';
+        return;
+      }
+    }
+
+    if (row.files.every((x) => x.status === 'done')) {
+      row.state = 'completed';
+      this.saveSenderResumeSession(null);
+    }
+  }
+
+  private startSenderRtc(
+    row: TransferRowItem,
+    senderFiles: SenderFileItem[]
+  ): void {
+    const p2pMeta = row.files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES);
     const sess = new WebRtcTransferSession(
       row.transferId,
       'sender',
-      row.files,
+      p2pMeta,
       senderFiles,
       this.selfDeviceId,
       this.selfDisplayName,
@@ -743,8 +1045,10 @@ class AppState {
         },
         onFileDoneReceiver: () => {},
         onAllDone: () => {
-          row.state = 'completed';
-          this.saveSenderResumeSession(null);
+          if (row.files.every((x) => x.status === 'done')) {
+            row.state = 'completed';
+            this.saveSenderResumeSession(null);
+          }
         },
       }
     );
@@ -810,12 +1114,20 @@ class AppState {
           }
         },
         onAllDone: (filesCount) => {
-          row.state = 'completed';
-          this.signaling?.send({
-            type: 'transfer:complete',
-            transferId,
-            filesReceived: filesCount,
-          });
+          if (row.files.every((x) => x.status === 'done')) {
+            row.state = 'completed';
+            this.signaling?.send({
+              type: 'transfer:complete',
+              transferId,
+              filesReceived: row.files.length,
+            });
+          } else {
+            this.signaling?.send({
+              type: 'transfer:complete',
+              transferId,
+              filesReceived: filesCount,
+            });
+          }
         },
       }
     );
@@ -849,7 +1161,7 @@ class AppState {
     const row = this.transfers.find((r) => r.transferId === transferId);
     if (row) {
       for (const f of row.files) {
-        if (f.downloadUrl) {
+        if (f.downloadUrl && f.downloadUrl.startsWith('blob:')) {
           URL.revokeObjectURL(f.downloadUrl);
         }
       }
@@ -857,7 +1169,37 @@ class AppState {
     this.transfers = this.transfers.filter((r) => r.transferId !== transferId);
   }
 
-  triggerSingleFileDownload(fileRow: TransferFileRow): void {
+  async triggerSingleFileDownload(fileRow: TransferFileRow): Promise<void> {
+    if (fileRow.cloudLinkId) {
+      try {
+        const res = await fetch(
+          `/api/links/${encodeURIComponent(fileRow.cloudLinkId)}/download`,
+          { method: 'POST' }
+        );
+        if (res.ok) {
+          const data = (await res.json()) as {
+            downloadUrl: string;
+            fileName: string;
+          };
+          const a = document.createElement('a');
+          a.href = data.downloadUrl;
+          a.download = sanitizeFilename(data.fileName);
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          fileRow.downloaded = true;
+          setTimeout(() => {
+            fetch(
+              `/api/links/${encodeURIComponent(fileRow.cloudLinkId!)}/downloaded`,
+              { method: 'POST' }
+            ).catch(() => {});
+          }, 4_000);
+          return;
+        }
+      } catch {
+        // fallback ke cloudShareUrl
+      }
+    }
     if (!fileRow.downloadUrl) return;
     const a = document.createElement('a');
     a.href = fileRow.downloadUrl;
@@ -866,6 +1208,19 @@ class AppState {
     a.click();
     a.remove();
     fileRow.downloaded = true;
+  }
+
+  async copyCloudFileLink(fileRow: TransferFileRow): Promise<void> {
+    if (!fileRow.cloudShareUrl) return;
+    try {
+      await navigator.clipboard.writeText(fileRow.cloudShareUrl);
+      fileRow.copied = true;
+      setTimeout(() => {
+        fileRow.copied = false;
+      }, 2_000);
+    } catch {
+      // abaikan
+    }
   }
 
   // Pairing Actions (S5)
@@ -903,21 +1258,11 @@ class AppState {
           enabled: boolean;
           remaining: number;
         };
-        this.linkR2Enabled = data.enabled;
         this.linkQuotaRemaining = data.remaining;
       }
     } catch {
       // abaikan
     }
-  }
-
-  openLinkDialog(): void {
-    this.fetchLinkQuota();
-    this.linkDialogOpen = true;
-  }
-
-  closeLinkDialog(): void {
-    this.linkDialogOpen = false;
   }
 }
 

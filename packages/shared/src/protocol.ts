@@ -59,6 +59,21 @@ export type ClientMessage =
       type: 'transfer:complete';
       transferId: string;
       filesReceived: number;
+    }
+  | {
+      type: 'transfer:cloud-progress';
+      transferId: string;
+      targetDeviceId: string;
+      fileId: string;
+      bytesUploaded: number;
+    }
+  | {
+      type: 'transfer:cloud-ready';
+      transferId: string;
+      targetDeviceId: string;
+      fileId: string;
+      linkId: string;
+      shareUrl: string;
     };
 
 export type PairErrorReason =
@@ -136,6 +151,19 @@ export type ServerMessage =
       type: 'quota:update';
       quotaRemaining: number;
       quotaResetAt: string;
+    }
+  | {
+      type: 'transfer:cloud-progress';
+      transferId: string;
+      fileId: string;
+      bytesUploaded: number;
+    }
+  | {
+      type: 'transfer:cloud-ready';
+      transferId: string;
+      fileId: string;
+      linkId: string;
+      shareUrl: string;
     };
 
 export type DcControlMessage =

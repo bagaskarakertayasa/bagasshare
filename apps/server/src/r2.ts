@@ -1,11 +1,19 @@
 import { createHmac, createHash } from 'node:crypto';
-import https from 'node:https';
 
 export interface R2Config {
   accountId: string;
   accessKeyId: string;
   secretAccessKey: string;
   bucketName: string;
+}
+
+function cleanAccountId(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .split('/')[0]!
+    .replace(/\.r2\.cloudflarestorage\.com$/, '');
 }
 
 function sha256Hex(data: string): string {
@@ -53,7 +61,7 @@ export function createR2PresignedUrl(params: {
   queryParams?: Record<string, string>;
 }): string {
   const { config, method, objectKey, expiresInSec, queryParams = {} } = params;
-  const host = `${config.accountId}.r2.cloudflarestorage.com`;
+  const host = `${cleanAccountId(config.accountId)}.r2.cloudflarestorage.com`;
   const canonicalUri = `/${encodeRfc3986(config.bucketName)}/${encodeS3Key(objectKey)}`;
   const { amzDate, dateStamp } = toAmzDate();
   const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
@@ -98,7 +106,7 @@ export function createR2PresignedUrl(params: {
  * Menjalankan request S3 bertanda tangan langsung dari server ke Cloudflare R2
  * (untuk CreateMultipartUpload, CompleteMultipartUpload, AbortMultipartUpload, dan DeleteObject).
  */
-export function sendSignedR2Request(params: {
+export async function sendSignedR2Request(params: {
   config: R2Config;
   method: 'POST' | 'DELETE';
   objectKey: string;
@@ -114,7 +122,7 @@ export function sendSignedR2Request(params: {
     body = '',
     contentType,
   } = params;
-  const host = `${config.accountId}.r2.cloudflarestorage.com`;
+  const host = `${cleanAccountId(config.accountId)}.r2.cloudflarestorage.com`;
   const canonicalUri = `/${encodeRfc3986(config.bucketName)}/${encodeS3Key(objectKey)}`;
   const { amzDate, dateStamp } = toAmzDate();
   const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
@@ -160,45 +168,29 @@ export function sendSignedR2Request(params: {
   const signature = hmacSha256(signingKey, stringToSign).toString('hex');
   const authHeader = `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
-  const reqHeaders: Record<string, string | number> = {
-    Host: host,
+  const reqHeaders: Record<string, string> = {
     'x-amz-date': amzDate,
     'x-amz-content-sha256': payloadHash,
     Authorization: authHeader,
-    'Content-Length': Buffer.byteLength(body, 'utf8'),
   };
   if (contentType) {
     reqHeaders['Content-Type'] = contentType;
   }
 
-  const pathWithQuery = canonicalQueryString
-    ? `${canonicalUri}?${canonicalQueryString}`
-    : canonicalUri;
+  const url = canonicalQueryString
+    ? `https://${host}${canonicalUri}?${canonicalQueryString}`
+    : `https://${host}${canonicalUri}`;
 
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: host,
-        port: 443,
-        method,
-        path: pathWithQuery,
-        headers: reqHeaders,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => {
-          resolve({
-            statusCode: res.statusCode || 500,
-            body: Buffer.concat(chunks).toString('utf8'),
-          });
-        });
-      }
-    );
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
+  const res = await fetch(url, {
+    method,
+    headers: reqHeaders,
+    body: body ? body : undefined,
   });
+
+  return {
+    statusCode: res.status,
+    body: await res.text(),
+  };
 }
 
 export async function r2CreateMultipartUpload(

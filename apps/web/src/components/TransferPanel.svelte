@@ -164,7 +164,28 @@
                         : appState.t('downloadBtn')}
                     </button>
                   {/if}
+                  {#if f.cloudShareUrl}
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-small"
+                      onclick={() => appState.copyCloudFileLink(f)}
+                    >
+                      {f.copied
+                        ? appState.t('linkCopiedBtn')
+                        : appState.t('linkCopyBtn')}
+                    </button>
+                  {/if}
                 </div>
+                {#if f.cloudShareUrl}
+                  <a
+                    href={f.cloudShareUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="cloud-link-url"
+                  >
+                    {f.cloudShareUrl}
+                  </a>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -354,6 +375,15 @@
     font-size: 12px;
     line-height: 16px;
     color: var(--ink-muted);
+  }
+
+  .cloud-link-url {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--data);
+    font-weight: 600;
+    word-break: break-all;
+    text-decoration: underline;
   }
 
   @media (max-width: 639px) {

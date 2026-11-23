@@ -8,18 +8,20 @@ const DEVICE_ID_STORAGE_KEY = 'bagas_share_device_id';
 const PAIR_TOKEN_SESSION_KEY = 'bagas_share_pair_token';
 
 export function getOrCreateDeviceId(): string {
-  if (typeof localStorage !== 'undefined') {
-    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
-    if (existing && /^[a-zA-Z0-9_-]{6,64}$/.test(existing)) {
-      return existing;
+  // Gunakan sessionStorage agar setiap tab yang dibuka di browser yang sama
+  // memiliki deviceId sendiri (tidak saling menendang koneksi WebSocket setiap 5 detik)
+  if (typeof sessionStorage !== 'undefined') {
+    const existingTabId = sessionStorage.getItem(DEVICE_ID_STORAGE_KEY);
+    if (existingTabId && /^[a-zA-Z0-9_-]{6,64}$/.test(existingTabId)) {
+      return existingTabId;
     }
   }
   const id =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : 'dev_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
-  if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(DEVICE_ID_STORAGE_KEY, id);
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.setItem(DEVICE_ID_STORAGE_KEY, id);
   }
   return id;
 }

@@ -8,7 +8,7 @@
     "build": "pnpm -r build",
     "dev:server": "pnpm --filter @bagas-share/server dev",
     "dev:web": "pnpm --filter @bagas-share/web dev",
-    "start:tunnel": "pnpm -r build && cross-env PORT=3001 TRUST_PROXY=1 STATIC_DIR=C:\\all-project\\Bagas-Share\\apps\\web\\dist node apps/server/dist/index.js",
+    "start:local": "pnpm -r build && node apps/server/dist/start.js",
     "test": "pnpm -r test"
   },
   "devDependencies": {

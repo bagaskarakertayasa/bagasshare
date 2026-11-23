@@ -53,10 +53,14 @@ export interface BatchValidationResult {
   totalSizeBytes: number;
   exceedsTotalLimit: boolean;
   exceedsQuota: boolean;
+  usesCloudLink: boolean;
 }
 
 /**
  * Validasi daftar file di client maupun server (PRD FR5.2, FR5.3, FR5.5, FR6.1, FR6.3).
+ * - File <= 500 MiB dikirim langsung via P2P WebRTC (batas total P2P 1 GiB).
+ * - File > 500 MiB s/d 5 GiB otomatis dialihkan ke Cloudflare R2 Link (usesCloudLink = true,
+ *   batas total menjadi 5 GiB).
  */
 export function validateTransferFiles(
   files: ReadonlyArray<Pick<TransferFileMeta, 'fileId' | 'name' | 'size'>>,
@@ -64,6 +68,7 @@ export function validateTransferFiles(
 ): BatchValidationResult {
   const fileIssues: FileValidationIssue[] = [];
   let totalSizeBytes = 0;
+  let usesCloudLink = false;
 
   for (const f of files) {
     totalSizeBytes += f.size;
@@ -71,9 +76,12 @@ export function validateTransferFiles(
       fileIssues.push({ fileId: f.fileId, name: f.name, reason: 'empty' });
       continue;
     }
-    if (f.size > MAX_FILE_SIZE_BYTES) {
+    if (f.size > LINK_MAX_FILE_SIZE_BYTES) {
       fileIssues.push({ fileId: f.fileId, name: f.name, reason: 'too_large' });
       continue;
+    }
+    if (f.size > MAX_FILE_SIZE_BYTES) {
+      usesCloudLink = true;
     }
     const blocked = getBlockedExtension(f.name);
     if (blocked) {
@@ -86,7 +94,10 @@ export function validateTransferFiles(
     }
   }
 
-  const exceedsTotalLimit = totalSizeBytes > MAX_TOTAL_SIZE_BYTES;
+  const maxAllowedTotal = usesCloudLink
+    ? LINK_MAX_FILE_SIZE_BYTES
+    : MAX_TOTAL_SIZE_BYTES;
+  const exceedsTotalLimit = totalSizeBytes > maxAllowedTotal;
   const exceedsQuota = files.length > quotaRemaining;
 
   return {
@@ -99,6 +110,7 @@ export function validateTransferFiles(
     totalSizeBytes,
     exceedsTotalLimit,
     exceedsQuota,
+    usesCloudLink,
   };
 }
 

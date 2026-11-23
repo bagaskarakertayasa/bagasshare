@@ -236,6 +236,46 @@ export class TransferManager {
     });
   }
 
+  relayCloudProgress(params: {
+    fromDeviceId: string;
+    targetDeviceId: string;
+    transferId: string;
+    fileId: string;
+    bytesUploaded: number;
+  }): void {
+    const tr = this.transfers.get(params.transferId);
+    if (!tr || tr.status !== 'accepted' || tr.senderDeviceId !== params.fromDeviceId) {
+      return;
+    }
+    this.groups.sendTo(tr.receiverDeviceId, {
+      type: 'transfer:cloud-progress',
+      transferId: params.transferId,
+      fileId: params.fileId,
+      bytesUploaded: params.bytesUploaded,
+    });
+  }
+
+  relayCloudReady(params: {
+    fromDeviceId: string;
+    targetDeviceId: string;
+    transferId: string;
+    fileId: string;
+    linkId: string;
+    shareUrl: string;
+  }): void {
+    const tr = this.transfers.get(params.transferId);
+    if (!tr || tr.status !== 'accepted' || tr.senderDeviceId !== params.fromDeviceId) {
+      return;
+    }
+    this.groups.sendTo(tr.receiverDeviceId, {
+      type: 'transfer:cloud-ready',
+      transferId: params.transferId,
+      fileId: params.fileId,
+      linkId: params.linkId,
+      shareUrl: params.shareUrl,
+    });
+  }
+
   private expireTransfer(transferId: string): void {
     const tr = this.transfers.get(transferId);
     if (!tr || tr.status !== 'pending') return;
