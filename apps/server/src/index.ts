@@ -8,7 +8,7 @@ import { GroupManager } from './group-manager.js';
 import { TransferManager } from './transfer-manager.js';
 import { SignalingHandler } from './ws-handler.js';
 import { registerLinkRoutes } from './link-routes.js';
-import { r2DeleteObject } from './r2.js';
+import { r2AbortMultipartUpload, r2DeleteObject } from './r2.js';
 
 const MIME_MAP: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -50,7 +50,8 @@ export async function createServer(customConfig?: Partial<ServerConfig>) {
 
   await app.ready();
 
-  const wss = new WebSocketServer({ noServer: true });
+  // F6: Batasi payload WebSocket 64 KiB (cukup untuk SDP/ICE & metadata, cegah OOM di 192 MB heap)
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   app.server.on('upgrade', (req, socket, head) => {
     const pathname = (req.url || '').split('?')[0];
     if (pathname === '/ws') {
@@ -70,10 +71,15 @@ export async function createServer(customConfig?: Partial<ServerConfig>) {
   }, 3_000);
 
   const cleanupTimer = setInterval(async () => {
+    handler.pruneRateLimits();
     const expiredLinks = db.getExpiredSharedLinks();
     for (const item of expiredLinks) {
       if (config.r2) {
-        await r2DeleteObject(config.r2, item.objectKey);
+        if (item.status === 'uploading') {
+          await r2AbortMultipartUpload(config.r2, item.objectKey, item.uploadId);
+        } else {
+          await r2DeleteObject(config.r2, item.objectKey);
+        }
       }
       db.markSharedLinkDeleted(item.linkId);
     }

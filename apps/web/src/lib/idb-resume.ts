@@ -54,11 +54,6 @@ function openDb(): Promise<IDBDatabase | null> {
   return dbPromise;
 }
 
-export async function isIdbAvailable(): Promise<boolean> {
-  const db = await openDb();
-  return db !== null;
-}
-
 export async function saveTransferMeta(meta: StoredTransferMeta): Promise<boolean> {
   const db = await openDb();
   if (!db) return false;

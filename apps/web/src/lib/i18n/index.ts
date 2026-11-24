@@ -1,3 +1,4 @@
+import { QUOTA_TIMEZONE } from '@bagas-share/shared';
 import idDict from './id.json';
 import enDict from './en.json';
 
@@ -67,4 +68,29 @@ export function formatCountdown(seconds: number): string {
   const m = Math.floor(s / 60);
   const rem = s % 60;
   return `${m}:${String(rem).padStart(2, '0')}`;
+}
+
+export function formatWitaDateTime(
+  iso: string,
+  locale: Locale,
+  includeYear = false
+): string {
+  try {
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: QUOTA_TIMEZONE,
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    };
+    if (includeYear) {
+      options.year = 'numeric';
+    }
+    return new Intl.DateTimeFormat(
+      locale === 'id' ? 'id-ID' : 'en-US',
+      options
+    ).format(new Date(iso));
+  } catch {
+    return iso;
+  }
 }

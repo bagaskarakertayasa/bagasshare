@@ -1,12 +1,9 @@
 import {
-  CHUNK_SIZE_BYTES,
   DAILY_FILE_QUOTA,
-  LINK_PARALLEL_UPLOADS,
+  LINK_DAILY_QUOTA_PER_IP,
   MAX_FILE_SIZE_BYTES,
-  sanitizeFilename,
   validateTransferFiles,
   type ColorSlot,
-  type DeviceKind,
   type PairErrorReason,
   type PeerInfo,
   type ServerMessage,
@@ -20,16 +17,22 @@ import {
   type TranslationKey,
 } from './i18n/index.js';
 import { computeFileSha256Hex } from './hash.js';
-import {
-  cleanupExpiredStoredFiles,
-  deleteStoredFile,
-  getAllStoredTransfers,
-} from './idb-resume.js';
-import {
-  SignalingClient,
-  setSessionPairToken,
-} from './signaling.js';
+import { deleteStoredFile } from './idb-resume.js';
+import { SignalingClient, setSessionPairToken } from './signaling.js';
 import { WebRtcTransferSession, type SenderFileItem } from './webrtc.js';
+import { uploadFileToCloudflareR2 } from './cloud-upload.js';
+import {
+  copyTextToClipboard,
+  downloadCloudLink,
+  triggerBrowserDownload,
+} from './download.js';
+import {
+  loadInterruptedTransfers,
+  writeSenderResumeSession,
+  type PendingSenderResume,
+} from './resume-session.js';
+
+export type { PendingSenderResume };
 
 export type TransferRowState =
   | 'waiting_approval'
@@ -69,7 +72,6 @@ export interface TransferRowItem {
   state: TransferRowState;
   expiresAtMs?: number;
   files: TransferFileRow[];
-  expanded: boolean;
 }
 
 export interface ComposerCandidateFile {
@@ -82,22 +84,12 @@ export interface ComposerCandidateFile {
   blockedExtension?: string;
 }
 
-export interface PendingSenderResume {
-  transferId: string;
-  targetDeviceId: string;
-  targetDisplayName: string;
-  targetColorSlot: ColorSlot;
-  files: TransferFileMeta[];
-}
-
 export interface ToastItem {
   id: string;
   kind: 'info' | 'error';
   message: string;
   persistent?: boolean;
 }
-
-const SENDER_RESUME_SESSION_KEY = 'bagas_share_pending_sender_resume';
 
 class AppState {
   locale = $state<Locale>(getInitialLocale());
@@ -112,7 +104,6 @@ class AppState {
       window.location.pathname !== '/index.html' &&
       !window.location.pathname.startsWith('/d/')
   );
-
   downloadLinkId = $state<string | null>(
     typeof window !== 'undefined' && window.location.pathname.startsWith('/d/')
       ? window.location.pathname.slice(3).split('/')[0] || null
@@ -126,14 +117,10 @@ class AppState {
   );
   selfDeviceId = $state<string>('');
   selfDisplayName = $state<string>('');
-  selfKind = $state<DeviceKind>('unknown');
-  groupId = $state<string>('');
-  groupFull = $state<boolean>(false);
 
   // Kuota Harian
   quotaRemaining = $state<number>(DAILY_FILE_QUOTA);
-  quotaResetAt = $state<string>('');
-  linkQuotaRemaining = $state<number>(3);
+  linkQuotaRemaining = $state<number>(LINK_DAILY_QUOTA_PER_IP);
 
   // Daftar Peer
   peers = $state<PeerInfo[]>([]);
@@ -205,7 +192,7 @@ class AppState {
       this.nowMs = Date.now();
     }, 1_000);
 
-    this.loadInterruptedStateOnBoot();
+    this.restoreInterruptedTransfers();
 
     this.signaling = new SignalingClient({
       onOpen: () => {
@@ -221,58 +208,24 @@ class AppState {
     this.signaling.connect();
   }
 
-  private async loadInterruptedStateOnBoot(): Promise<void> {
-    await cleanupExpiredStoredFiles();
-
-    // 1. Cek sesi pengirim yang belum selesai di sessionStorage
-    if (typeof sessionStorage !== 'undefined') {
-      const raw = sessionStorage.getItem(SENDER_RESUME_SESSION_KEY);
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw) as PendingSenderResume;
-          if (parsed && parsed.files?.length > 0) {
-            this.pendingSenderResume = parsed;
-          }
-        } catch {
-          // abaikan
-        }
-      }
+  private async restoreInterruptedTransfers(): Promise<void> {
+    const { senderResume, receiverTransfers } = await loadInterruptedTransfers();
+    if (senderResume) {
+      this.pendingSenderResume = senderResume;
     }
-
-    // 2. Cek chunk parsial di IndexedDB untuk penerima
-    const stored = await getAllStoredTransfers();
-    if (stored.length > 0) {
-      const byTransfer = new Map<string, typeof stored>();
-      for (const item of stored) {
-        const list = byTransfer.get(item.transferId) ?? [];
-        list.push(item);
-        byTransfer.set(item.transferId, list);
-      }
-
-      for (const [transferId, items] of byTransfer) {
-        const first = items[0]!;
-        this.transfers.unshift({
-          transferId,
-          role: 'receiver',
-          peerDeviceId: first.senderDeviceId,
-          peerDisplayName: first.senderDisplayName || 'Perangkat',
-          peerColorSlot: 1,
-          state: 'paused',
-          expanded: true,
-          files: items.map((m) => ({
-            fileId: m.fileId,
-            name: m.fileName,
-            size: m.fileSize,
-            mimeType: m.mimeType,
-            sha256: m.fileSha256,
-            bytesTransferred: Math.min(
-              m.fileSize,
-              Math.max(0, (m.lastChunkIndex + 1) * CHUNK_SIZE_BYTES)
-            ),
-            status: 'transferring',
-          })),
-        });
-      }
+    for (const rt of receiverTransfers) {
+      this.transfers.unshift({
+        transferId: rt.transferId,
+        role: 'receiver',
+        peerDeviceId: rt.peerDeviceId,
+        peerDisplayName: rt.peerDisplayName,
+        peerColorSlot: 1,
+        state: 'paused',
+        files: rt.files.map((f) => ({
+          ...f,
+          status: 'transferring',
+        })),
+      });
     }
   }
 
@@ -283,12 +236,7 @@ class AppState {
     if (!data || showBanner) {
       this.pendingSenderResume = data;
     }
-    if (typeof sessionStorage === 'undefined') return;
-    if (data) {
-      sessionStorage.setItem(SENDER_RESUME_SESSION_KEY, JSON.stringify(data));
-    } else {
-      sessionStorage.removeItem(SENDER_RESUME_SESSION_KEY);
-    }
+    writeSenderResumeSession(data);
   }
 
   reconnectNow(): void {
@@ -314,18 +262,13 @@ class AppState {
     switch (msg.type) {
       case 'welcome': {
         this.connectionState = 'connected';
-        this.groupFull = false;
         this.selfDeviceId = msg.deviceId;
         this.selfDisplayName = msg.displayName;
-        this.selfKind = msg.kind;
-        this.groupId = msg.groupId;
         this.quotaRemaining = msg.quotaRemaining;
-        this.quotaResetAt = msg.quotaResetAt;
         break;
       }
 
       case 'group:full': {
-        this.groupFull = true;
         this.peers = [];
         this.addToast(this.t('toastGroupFull'), 'error', true);
         break;
@@ -363,7 +306,6 @@ class AppState {
       case 'pair:joined': {
         this.pairingLoading = false;
         this.pairingError = null;
-        this.groupId = msg.groupId;
         setSessionPairToken(msg.pairToken);
         this.pairingOpen = false;
         break;
@@ -400,8 +342,6 @@ class AppState {
       }
 
       case 'transfer:incoming': {
-        // Jika ini adalah resume dari file yang sudah kita simpan parsialnya di IndexedDB,
-        // langsung setujui otomatis jika pengguna sebelumnya sudah menyetujui transferId yang sama
         const existingPaused = this.transfers.find(
           (t) =>
             t.role === 'receiver' &&
@@ -441,16 +381,16 @@ class AppState {
 
         if (msg.status === 'accepted' && row && row.role === 'sender') {
           row.state = 'connecting';
-          this.startSenderTransfer(row);
+          const senderFiles = this.senderRawFiles.get(row.transferId) ?? [];
+          if (senderFiles.length > 0) {
+            this.startSenderRtc(row, senderFiles);
+          }
         } else if (msg.status === 'rejected' && row) {
           row.state = 'rejected';
           this.saveSenderResumeSession(null);
         } else if (msg.status === 'expired') {
           if (row) row.state = 'expired';
-          if (
-            this.incomingRequest &&
-            this.incomingRequest.transferId === msg.transferId
-          ) {
+          if (this.incomingRequest?.transferId === msg.transferId) {
             this.incomingRequest.status = 'expired';
             document.title = this.t('appName');
           }
@@ -460,10 +400,7 @@ class AppState {
           this.saveSenderResumeSession(null);
         } else if (msg.status === 'cancelled') {
           if (row) row.state = 'cancelled';
-          if (
-            this.incomingRequest &&
-            this.incomingRequest.transferId === msg.transferId
-          ) {
+          if (this.incomingRequest?.transferId === msg.transferId) {
             this.incomingRequest.status = 'cancelled';
             document.title = this.t('appName');
           }
@@ -482,52 +419,14 @@ class AppState {
       }
 
       case 'rtc:signal': {
-        const sess = this.sessions.get(msg.transferId);
-        if (sess) {
-          sess.handleSignal({ sdp: msg.sdp, ice: msg.ice });
-        }
+        this.sessions
+          .get(msg.transferId)
+          ?.handleSignal({ sdp: msg.sdp, ice: msg.ice });
         break;
       }
 
       case 'quota:update': {
         this.quotaRemaining = msg.quotaRemaining;
-        this.quotaResetAt = msg.quotaResetAt;
-        break;
-      }
-
-      case 'transfer:cloud-progress': {
-        const row = this.transfers.find((r) => r.transferId === msg.transferId);
-        if (row) {
-          row.state = 'transferring';
-          const f = row.files.find((x) => x.fileId === msg.fileId);
-          if (f) {
-            f.bytesTransferred = msg.bytesUploaded;
-            f.status = 'transferring';
-          }
-        }
-        break;
-      }
-
-      case 'transfer:cloud-ready': {
-        const row = this.transfers.find((r) => r.transferId === msg.transferId);
-        if (row) {
-          const f = row.files.find((x) => x.fileId === msg.fileId);
-          if (f) {
-            f.bytesTransferred = f.size;
-            f.status = 'done';
-            f.cloudLinkId = msg.linkId;
-            f.cloudShareUrl = msg.shareUrl;
-            f.downloadUrl = msg.shareUrl;
-          }
-          if (row.files.every((x) => x.status === 'done')) {
-            row.state = 'completed';
-            this.signaling?.send({
-              type: 'transfer:complete',
-              transferId: row.transferId,
-              filesReceived: row.files.length,
-            });
-          }
-        }
         break;
       }
     }
@@ -547,8 +446,7 @@ class AppState {
   }
 
   addFilesToComposer(fileList: FileList | File[]): void {
-    const incoming = Array.from(fileList);
-    for (const f of incoming) {
+    for (const f of Array.from(fileList)) {
       const fileId = Math.random().toString(36).slice(2, 10);
       const check = validateTransferFiles(
         [{ fileId, name: f.name, size: f.size }],
@@ -584,14 +482,8 @@ class AppState {
     const target = this.composerTarget;
     if (!this.composerOpen || this.composerHashing) return;
     const validCandidates = this.composerFiles.filter((f) => !f.issue);
-    if (
-      validCandidates.length === 0 ||
-      validCandidates.length > this.quotaRemaining
-    ) {
-      return;
-    }
+    if (validCandidates.length === 0) return;
 
-    // Pisahkan file <= 500 MB (P2P) dan file > 500 MB (Cloudflare R2 Link otomatis)
     const p2pCandidates = validCandidates.filter(
       (c) => c.size <= MAX_FILE_SIZE_BYTES
     );
@@ -599,7 +491,6 @@ class AppState {
       (c) => c.size > MAX_FILE_SIZE_BYTES
     );
 
-    // Jika tidak ada peer penerima yang dipilih, semua file harus > 500 MB
     if (!target && p2pCandidates.length > 0) {
       this.addToast(this.t('errBelow500WithoutPeer'), 'error');
       return;
@@ -609,8 +500,6 @@ class AppState {
     try {
       this.closeComposer();
 
-      // 1. Semua file > 500 MB LANGSUNG di-upload ke Cloudflare R2 & dibuatkan link otomatis
-      // TANPA harus menunggu penerima menekan Terima atau terkoneksi P2P!
       if (cloudCandidates.length > 0) {
         const cloudTransferId =
           'cloud_' + Math.random().toString(36).slice(2, 10);
@@ -625,7 +514,7 @@ class AppState {
           },
         }));
 
-        const cloudRow: TransferRowItem = {
+        this.transfers.unshift({
           transferId: cloudTransferId,
           role: 'sender',
           peerDeviceId: target ? target.deviceId : '',
@@ -634,21 +523,15 @@ class AppState {
             : this.t('cloudLinkRowPeerName'),
           peerColorSlot: target ? target.colorSlot : 4,
           state: 'transferring',
-          expanded: true,
           files: cloudItems.map((s) => ({
             ...s.meta,
             bytesTransferred: 0,
             status: 'transferring',
           })),
-        };
-
-        this.transfers.unshift(cloudRow);
-        const reactiveCloudRow = this.transfers[0]!;
-        // Jalankan upload R2 langsung di background pada objek proxy reaktif Svelte 5
-        this.runCloudFilesUpload(reactiveCloudRow, cloudItems);
+        });
+        this.runCloudFilesUpload(this.transfers[0]!, cloudItems);
       }
 
-      // 2. Jika ada file <= 500 MB dan ada target device, jalankan alur P2P seperti biasa
       if (target && p2pCandidates.length > 0) {
         const senderItems: SenderFileItem[] = [];
         for (const c of p2pCandidates) {
@@ -665,7 +548,7 @@ class AppState {
           });
         }
 
-        const localRow: TransferRowItem = {
+        this.transfers.unshift({
           transferId: 'pending_local',
           role: 'sender',
           peerDeviceId: target.deviceId,
@@ -673,15 +556,12 @@ class AppState {
           peerColorSlot: target.colorSlot,
           state: 'waiting_approval',
           expiresAtMs: Date.now() + 60_000,
-          expanded: true,
           files: senderItems.map((s) => ({
             ...s.meta,
             bytesTransferred: 0,
             status: 'waiting',
           })),
-        };
-
-        this.transfers.unshift(localRow);
+        });
         this.senderRawFiles.set('pending_local', senderItems);
 
         this.signaling?.send({
@@ -719,7 +599,8 @@ class AppState {
       matchedItems.push({ file: candidate, meta: expected });
     }
 
-    const row: TransferRowItem = {
+    this.transfers = this.transfers.filter((t) => t.transferId !== resume.transferId);
+    this.transfers.unshift({
       transferId: resume.transferId,
       role: 'sender',
       peerDeviceId: resume.targetDeviceId,
@@ -727,16 +608,12 @@ class AppState {
       peerColorSlot: resume.targetColorSlot,
       state: 'waiting_approval',
       expiresAtMs: Date.now() + 60_000,
-      expanded: true,
       files: matchedItems.map((m) => ({
         ...m.meta,
         bytesTransferred: 0,
         status: 'waiting',
       })),
-    };
-
-    this.transfers = this.transfers.filter((t) => t.transferId !== resume.transferId);
-    this.transfers.unshift(row);
+    });
     this.senderRawFiles.set(resume.transferId, matchedItems);
     this.pendingSenderResume = null;
 
@@ -758,31 +635,24 @@ class AppState {
     if (!req || req.status !== 'active') return;
     document.title = this.t('appName');
 
-    const row: TransferRowItem = {
+    this.transfers.unshift({
       transferId: req.transferId,
       role: 'receiver',
       peerDeviceId: req.from.deviceId,
       peerDisplayName: req.from.displayName,
       peerColorSlot: req.from.colorSlot,
       state: 'connecting',
-      expanded: true,
       files: req.files.map((f) => ({
         ...f,
         bytesTransferred: 0,
         status: 'waiting',
       })),
-    };
-
-    this.transfers.unshift(row);
+    });
     this.incomingRequest = null;
 
-    const hasP2PFile = req.files.some((f) => f.size <= MAX_FILE_SIZE_BYTES);
-    if (hasP2PFile) {
-      this.startReceiverRtc(
-        req.transferId,
-        req.from,
-        req.files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES)
-      );
+    const p2pFiles = req.files.filter((f) => f.size <= MAX_FILE_SIZE_BYTES);
+    if (p2pFiles.length > 0) {
+      this.startReceiverRtc(req.transferId, req.from, p2pFiles);
     }
     this.signaling?.send({
       type: 'transfer:respond',
@@ -806,188 +676,49 @@ class AppState {
     this.incomingRequest = null;
   }
 
-  private startSenderTransfer(row: TransferRowItem): void {
-    const senderFiles = this.senderRawFiles.get(row.transferId) ?? [];
-    const p2pFiles = senderFiles.filter(
-      (s) => s.file.size <= MAX_FILE_SIZE_BYTES
-    );
-    const cloudFiles = senderFiles.filter(
-      (s) => s.file.size > MAX_FILE_SIZE_BYTES
-    );
-
-    if (p2pFiles.length > 0) {
-      this.startSenderRtc(row, p2pFiles);
-    }
-    if (cloudFiles.length > 0) {
-      this.runCloudFilesUpload(row, cloudFiles);
-    }
-  }
-
-  private uploadSinglePartToR2(
-    url: string,
-    slice: Blob,
-    onProgress: (loaded: number) => void
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', url, true);
-      xhr.upload.onprogress = (ev) => {
-        if (ev.lengthComputable) onProgress(ev.loaded);
-      };
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          const etag =
-            xhr.getResponseHeader('ETag') ||
-            xhr.getResponseHeader('etag') ||
-            '';
-          if (!etag) {
-            reject(new Error('Missing ETag header'));
-            return;
-          }
-          resolve(etag);
-        } else {
-          reject(new Error(`HTTP ${xhr.status}`));
-        }
-      };
-      xhr.onerror = () => reject(new Error('Network error'));
-      xhr.send(slice);
-    });
-  }
-
   private async runCloudFilesUpload(
     row: TransferRowItem,
     cloudFiles: SenderFileItem[]
   ): Promise<void> {
     row.state = 'transferring';
+    const isCancelled = () => row.state === 'cancelled';
 
     for (const item of cloudFiles) {
-      if (row.state === 'cancelled') return;
+      if (isCancelled()) return;
       const fRow = row.files.find((x) => x.fileId === item.meta.fileId);
       if (fRow) fRow.status = 'transferring';
 
-      try {
-        const initRes = await fetch('/api/links/init', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fileName: item.file.name,
-            fileSize: item.file.size,
-            mimeType: item.file.type || 'application/octet-stream',
-          }),
-        });
+      const res = await uploadFileToCloudflareR2({
+        file: item.file,
+        isCancelled,
+        onProgress: (bytesUploaded) => {
+          if (fRow) fRow.bytesTransferred = bytesUploaded;
+        },
+      });
 
-        if (!initRes.ok) {
-          const errData = (await initRes.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          if (errData.error === 'r2_not_configured') {
-            this.addToast(this.t('linkErrNotConfigured'), 'error');
-          } else if (errData.error === 'quota_exceeded') {
-            this.addToast(this.t('linkErrQuota'), 'error');
-          } else {
-            this.addToast(this.t('linkErrUploadFailed'), 'error');
-          }
-          if (fRow) fRow.status = 'failed';
-          row.state = 'failed_p2p';
-          return;
+      if (!res) return; // dibatalkan
+
+      if (!res.ok) {
+        if (res.error === 'r2_not_configured') {
+          this.addToast(this.t('linkErrNotConfigured'), 'error');
+        } else if (res.error === 'quota_exceeded') {
+          this.addToast(this.t('linkErrQuota'), 'error');
+        } else {
+          this.addToast(this.t('linkErrUploadFailed'), 'error');
         }
-
-        const initData = (await initRes.json()) as {
-          linkId: string;
-          chunkSize: number;
-          partUrls: Array<{ partNumber: number; url: string }>;
-        };
-
-        const partProgress = new Map<number, number>();
-        const completedParts: Array<{ partNumber: number; etag: string }> = [];
-        const queue = [...initData.partUrls];
-        let lastBroadcastMs = 0;
-
-        const updateProgress = (force = false) => {
-          let sum = 0;
-          for (const v of partProgress.values()) sum += v;
-          const uploaded = Math.min(item.file.size, sum);
-          if (fRow) fRow.bytesTransferred = uploaded;
-
-          const now = Date.now();
-          if (force || now - lastBroadcastMs >= 250) {
-            lastBroadcastMs = now;
-            this.signaling?.send({
-              type: 'transfer:cloud-progress',
-              transferId: row.transferId,
-              targetDeviceId: row.peerDeviceId,
-              fileId: item.meta.fileId,
-              bytesUploaded: uploaded,
-            });
-          }
-        };
-
-        const workers = Array.from(
-          { length: Math.min(LINK_PARALLEL_UPLOADS, queue.length) },
-          async () => {
-            while (queue.length > 0 && row.state !== 'cancelled') {
-              const part = queue.shift();
-              if (!part) break;
-              const start = (part.partNumber - 1) * initData.chunkSize;
-              const end = Math.min(item.file.size, start + initData.chunkSize);
-              const slice = item.file.slice(start, end);
-
-              const etag = await this.uploadSinglePartToR2(
-                part.url,
-                slice,
-                (loaded) => {
-                  partProgress.set(part.partNumber, loaded);
-                  updateProgress(false);
-                }
-              );
-              partProgress.set(part.partNumber, slice.size);
-              updateProgress(true);
-              completedParts.push({ partNumber: part.partNumber, etag });
-            }
-          }
-        );
-
-        await Promise.all(workers);
-        if (row.state === 'cancelled') return;
-
-        const compRes = await fetch(`/api/links/${initData.linkId}/complete`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ parts: completedParts }),
-        });
-
-        if (!compRes.ok) {
-          throw new Error('Complete failed');
-        }
-
-        const compData = (await compRes.json()) as {
-          linkId: string;
-          quotaRemaining?: number;
-        };
-        if (typeof compData.quotaRemaining === 'number') {
-          this.linkQuotaRemaining = compData.quotaRemaining;
-        }
-        const shareUrl = `${window.location.origin}/d/${initData.linkId}`;
-        if (fRow) {
-          fRow.bytesTransferred = item.file.size;
-          fRow.status = 'done';
-          fRow.cloudLinkId = initData.linkId;
-          fRow.cloudShareUrl = shareUrl;
-        }
-
-        this.signaling?.send({
-          type: 'transfer:cloud-ready',
-          transferId: row.transferId,
-          targetDeviceId: row.peerDeviceId,
-          fileId: item.meta.fileId,
-          linkId: initData.linkId,
-          shareUrl,
-        });
-      } catch {
-        this.addToast(this.t('linkErrUploadFailed'), 'error');
         if (fRow) fRow.status = 'failed';
         row.state = 'failed_p2p';
         return;
+      }
+
+      if (typeof res.quotaRemaining === 'number') {
+        this.linkQuotaRemaining = res.quotaRemaining;
+      }
+      if (fRow) {
+        fRow.bytesTransferred = item.file.size;
+        fRow.status = 'done';
+        fRow.cloudLinkId = res.linkId;
+        fRow.cloudShareUrl = res.shareUrl;
       }
     }
 
@@ -1023,9 +754,7 @@ class AppState {
           row.state = 'transferring';
         },
         onDisconnected: () => {
-          if (row.state === 'transferring') {
-            row.state = 'paused';
-          }
+          if (row.state === 'transferring') row.state = 'paused';
         },
         onFailedP2P: () => {
           row.state = 'failed_p2p';
@@ -1085,9 +814,7 @@ class AppState {
           row.state = 'transferring';
         },
         onDisconnected: () => {
-          if (row.state === 'transferring') {
-            row.state = 'paused';
-          }
+          if (row.state === 'transferring') row.state = 'paused';
         },
         onFailedP2P: () => {
           row.state = 'failed_p2p';
@@ -1149,7 +876,7 @@ class AppState {
       }
     }
 
-    if (transferId !== 'pending_local') {
+    if (transferId !== 'pending_local' && !transferId.startsWith('cloud_')) {
       this.signaling?.send({
         type: 'transfer:cancel',
         transferId,
@@ -1161,7 +888,7 @@ class AppState {
     const row = this.transfers.find((r) => r.transferId === transferId);
     if (row) {
       for (const f of row.files) {
-        if (f.downloadUrl && f.downloadUrl.startsWith('blob:')) {
+        if (f.downloadUrl?.startsWith('blob:')) {
           URL.revokeObjectURL(f.downloadUrl);
         }
       }
@@ -1172,54 +899,28 @@ class AppState {
   async triggerSingleFileDownload(fileRow: TransferFileRow): Promise<void> {
     if (fileRow.cloudLinkId) {
       try {
-        const res = await fetch(
-          `/api/links/${encodeURIComponent(fileRow.cloudLinkId)}/download`,
-          { method: 'POST' }
-        );
-        if (res.ok) {
-          const data = (await res.json()) as {
-            downloadUrl: string;
-            fileName: string;
-          };
-          const a = document.createElement('a');
-          a.href = data.downloadUrl;
-          a.download = sanitizeFilename(data.fileName);
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+        const ok = await downloadCloudLink(fileRow.cloudLinkId);
+        if (ok) {
           fileRow.downloaded = true;
-          setTimeout(() => {
-            fetch(
-              `/api/links/${encodeURIComponent(fileRow.cloudLinkId!)}/downloaded`,
-              { method: 'POST' }
-            ).catch(() => {});
-          }, 4_000);
           return;
         }
       } catch {
-        // fallback ke cloudShareUrl
+        // fallback ke downloadUrl
       }
     }
     if (!fileRow.downloadUrl) return;
-    const a = document.createElement('a');
-    a.href = fileRow.downloadUrl;
-    a.download = sanitizeFilename(fileRow.name);
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    triggerBrowserDownload(fileRow.downloadUrl, fileRow.name);
     fileRow.downloaded = true;
   }
 
   async copyCloudFileLink(fileRow: TransferFileRow): Promise<void> {
     if (!fileRow.cloudShareUrl) return;
-    try {
-      await navigator.clipboard.writeText(fileRow.cloudShareUrl);
+    const ok = await copyTextToClipboard(fileRow.cloudShareUrl);
+    if (ok) {
       fileRow.copied = true;
       setTimeout(() => {
         fileRow.copied = false;
       }, 2_000);
-    } catch {
-      // abaikan
     }
   }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { formatBytes } from '../lib/i18n/index.js';
+  import { formatBytes, formatWitaDateTime } from '../lib/i18n/index.js';
+  import { downloadCloudLink } from '../lib/download.js';
   import { appState } from '../lib/state.svelte.js';
 
   let { linkId }: { linkId: string } = $props();
@@ -30,57 +31,17 @@
     }
   });
 
-  function formatExpiry(iso: string): string {
-    try {
-      return new Intl.DateTimeFormat(
-        appState.locale === 'id' ? 'id-ID' : 'en-US',
-        {
-          timeZone: 'Asia/Makassar',
-          hour: '2-digit',
-          minute: '2-digit',
-          day: 'numeric',
-          month: 'short',
-        }
-      ).format(new Date(iso));
-    } catch {
-      return iso;
-    }
-  }
-
   async function handleDownload() {
     if (!meta || status !== 'ready') return;
     status = 'downloading';
 
     try {
-      const res = await fetch(`/api/links/${encodeURIComponent(linkId)}/download`, {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        status = 'expired';
-        return;
-      }
-      const { downloadUrl, fileName } = (await res.json()) as {
-        downloadUrl: string;
-        fileName: string;
-      };
-
-      // Unduh langsung dari Cloudflare R2 menggunakan mekanisme native browser
-      // agar file 5 GB mengalir langsung ke disk tanpa memakai RAM browser
-      const a = document.createElement('a');
-      a.href = downloadUrl;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      // Beri jeda singkat agar unduhan HTTP ke R2 sudah dimulai oleh browser,
-      // lalu tandai link sudah dipakai (R2 tetap mengizinkan koneksi GET yang sudah berjalan sampai tuntas)
-      setTimeout(async () => {
-        await fetch(`/api/links/${encodeURIComponent(linkId)}/downloaded`, {
-          method: 'POST',
-        }).catch(() => {});
+      const ok = await downloadCloudLink(linkId, () => {
         status = 'done';
-      }, 4_000);
+      });
+      if (!ok) {
+        status = 'expired';
+      }
     } catch {
       status = 'expired';
     }
@@ -103,7 +64,7 @@
       <p class="file-meta tabular">
         {appState.t('downloadFileMeta', {
           size: formatBytes(meta.fileSize, appState.locale),
-          expires: formatExpiry(meta.expiresAt),
+          expires: formatWitaDateTime(meta.expiresAt, appState.locale),
         })}
       </p>
 

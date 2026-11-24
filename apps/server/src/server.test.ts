@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeIpToGroup } from './ip-group.js';
+import { extractClientIp, normalizeIpToGroup } from './ip-group.js';
 import { parseUserAgent, assignUniqueDisplayName } from './ua-name.js';
 import { StateDatabase, getWitaDateAndNextReset } from './db.js';
 import { GroupManager } from './group-manager.js';
@@ -13,6 +13,20 @@ describe('ip-group (D1 & D2)', () => {
     );
     expect(normalizeIpToGroup('2001:db8:abcd:12::99')).toBe('2001:0db8:abcd:0012');
     expect(normalizeIpToGroup('::1')).toBe('127.0.0.1');
+  });
+
+  it('hanya mempercayai X-Real-IP jika koneksi berasal dari loopback (F5)', () => {
+    const fromLoopback = {
+      headers: { 'x-real-ip': '203.0.113.5' },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any;
+    expect(extractClientIp(fromLoopback, true)).toBe('203.0.113.5');
+
+    const fromExternal = {
+      headers: { 'x-real-ip': '203.0.113.5' },
+      socket: { remoteAddress: '198.51.100.9' },
+    } as any;
+    expect(extractClientIp(fromExternal, true)).toBe('198.51.100.9');
   });
 });
 
@@ -121,7 +135,7 @@ describe('StateDatabase (kuota WITA & pairing)', () => {
   });
 });
 
-describe('GroupManager (batas 5 device & slot warna 1..4)', () => {
+describe('GroupManager (batas 5 device, slot warna, & proteksi sessionToken F4)', () => {
   it('menerima maksimal 5 device dan menolak device ke-6 dengan group_full', () => {
     const gm = new GroupManager();
     const fakeWs = { readyState: 1, send: () => {}, close: () => {} } as any;
@@ -129,6 +143,7 @@ describe('GroupManager (batas 5 device & slot warna 1..4)', () => {
     for (let i = 1; i <= 5; i++) {
       const res = gm.registerOrReconnect({
         deviceId: `dev-${i}`,
+        sessionToken: `secret-token-${i}-00000000`,
         groupId: 'g1',
         source: 'auto_ip',
         userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/130.0',
@@ -140,6 +155,7 @@ describe('GroupManager (batas 5 device & slot warna 1..4)', () => {
 
     const sixth = gm.registerOrReconnect({
       deviceId: 'dev-6',
+      sessionToken: 'secret-token-6-00000000',
       groupId: 'g1',
       source: 'auto_ip',
       userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/130.0',
@@ -147,5 +163,39 @@ describe('GroupManager (batas 5 device & slot warna 1..4)', () => {
       ws: fakeWs,
     });
     expect(sixth).toEqual({ ok: false, reason: 'group_full' });
+  });
+
+  it('mencegah pengambilalihan deviceId oleh klien lain dengan sessionToken berbeda (F4)', () => {
+    const gm = new GroupManager();
+    let victimClosed = false;
+    const victimWs = { readyState: 1, send: () => {}, close: () => { victimClosed = true; } } as any;
+    const attackerWs = { readyState: 1, send: () => {}, close: () => {} } as any;
+
+    const victim = gm.registerOrReconnect({
+      deviceId: 'victim-id-1234',
+      sessionToken: 'victim-secret-token-123456',
+      groupId: 'g1',
+      source: 'auto_ip',
+      userAgent: 'Chrome/130.0 Windows',
+      clientIp: '1.1.1.1',
+      ws: victimWs,
+    });
+    expect(victim.ok).toBe(true);
+
+    const hijack = gm.registerOrReconnect({
+      deviceId: 'victim-id-1234',
+      sessionToken: 'attacker-different-token-999',
+      groupId: 'g1',
+      source: 'auto_ip',
+      userAgent: 'Chrome/130.0 Android',
+      clientIp: '1.1.1.1',
+      ws: attackerWs,
+    });
+    expect(hijack.ok).toBe(true);
+    if (hijack.ok) {
+      expect(hijack.device.deviceId).not.toBe('victim-id-1234');
+    }
+    expect(victimClosed).toBe(false);
+    expect(gm.getDevice('victim-id-1234')?.ws).toBe(victimWs);
   });
 });

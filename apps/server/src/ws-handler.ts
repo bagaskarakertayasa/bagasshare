@@ -10,8 +10,12 @@ import type { StateDatabase } from './db.js';
 import type { GroupManager } from './group-manager.js';
 import type { TransferManager } from './transfer-manager.js';
 
+const PAIR_CREATE_MAX_PER_HOUR = 5;
+const PAIR_CREATE_WINDOW_MS = 60 * 60 * 1000;
+
 export class SignalingHandler {
   private connRate = new Map<string, { count: number; resetAt: number }>();
+  private pairCreateRate = new Map<string, { count: number; resetAt: number }>();
 
   constructor(
     private db: StateDatabase,
@@ -20,7 +24,17 @@ export class SignalingHandler {
     private trustProxy: boolean
   ) {}
 
+  pruneRateLimits(nowMs: number = Date.now()): void {
+    for (const [ip, entry] of this.connRate) {
+      if (nowMs > entry.resetAt) this.connRate.delete(ip);
+    }
+    for (const [ip, entry] of this.pairCreateRate) {
+      if (nowMs > entry.resetAt) this.pairCreateRate.delete(ip);
+    }
+  }
+
   private checkConnectionRate(ip: string, nowMs: number = Date.now()): boolean {
+    if (this.connRate.size > 1000) this.pruneRateLimits(nowMs);
     const entry = this.connRate.get(ip);
     if (!entry || nowMs > entry.resetAt) {
       this.connRate.set(ip, { count: 1, resetAt: nowMs + 60_000 });
@@ -28,6 +42,26 @@ export class SignalingHandler {
     }
     entry.count += 1;
     return entry.count <= SIGNALING_CONN_RATE_PER_MIN;
+  }
+
+  private checkPairCreateRate(
+    ip: string,
+    nowMs: number = Date.now()
+  ): { ok: true } | { ok: false; retryAfterSec: number } {
+    if (this.pairCreateRate.size > 1000) this.pruneRateLimits(nowMs);
+    const entry = this.pairCreateRate.get(ip);
+    if (!entry || nowMs > entry.resetAt) {
+      this.pairCreateRate.set(ip, { count: 1, resetAt: nowMs + PAIR_CREATE_WINDOW_MS });
+      return { ok: true };
+    }
+    if (entry.count >= PAIR_CREATE_MAX_PER_HOUR) {
+      return {
+        ok: false,
+        retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - nowMs) / 1000)),
+      };
+    }
+    entry.count += 1;
+    return { ok: true };
   }
 
   handleConnection(ws: WebSocket, req: IncomingMessage): void {
@@ -39,9 +73,14 @@ export class SignalingHandler {
 
     const url = new URL(req.url || '/ws', 'http://localhost');
     const rawDeviceId = url.searchParams.get('deviceId')?.trim();
-    const deviceId =
+    const requestedDeviceId =
       rawDeviceId && /^[a-zA-Z0-9_-]{6,64}$/.test(rawDeviceId)
         ? rawDeviceId
+        : randomUUID();
+    const rawSessionToken = url.searchParams.get('sessionToken')?.trim();
+    const sessionToken =
+      rawSessionToken && /^[a-zA-Z0-9_-]{16,128}$/.test(rawSessionToken)
+        ? rawSessionToken
         : randomUUID();
     const pairToken = url.searchParams.get('pairToken')?.trim();
     const pairedGroupId = this.db.resolvePairToken(pairToken);
@@ -50,7 +89,8 @@ export class SignalingHandler {
     const source = pairedGroupId ? 'pairing_code' : 'auto_ip';
 
     const reg = this.groups.registerOrReconnect({
-      deviceId,
+      deviceId: requestedDeviceId,
+      sessionToken,
       groupId,
       source,
       userAgent: req.headers['user-agent'],
@@ -64,6 +104,7 @@ export class SignalingHandler {
       return;
     }
 
+    const deviceId = reg.device.deviceId;
     const quota = this.db.getQuotaStatus(clientIp);
     this.groups.sendTo(deviceId, {
       type: 'welcome',
@@ -104,6 +145,15 @@ export class SignalingHandler {
       case 'pair:create': {
         const dev = this.groups.getDevice(deviceId);
         if (!dev) return;
+        const rate = this.checkPairCreateRate(clientIp);
+        if (!rate.ok) {
+          this.groups.sendTo(deviceId, {
+            type: 'pair:error',
+            reason: 'rate_limited',
+            retryAfterSec: rate.retryAfterSec,
+          });
+          return;
+        }
         const created = this.db.createPairingCode(dev.groupId, deviceId);
         this.groups.sendTo(deviceId, {
           type: 'pair:created',
@@ -186,29 +236,6 @@ export class SignalingHandler {
           msg.transferId,
           Number(msg.filesReceived) || 1
         );
-        return;
-      }
-
-      case 'transfer:cloud-progress': {
-        this.transfers.relayCloudProgress({
-          fromDeviceId: deviceId,
-          targetDeviceId: msg.targetDeviceId,
-          transferId: msg.transferId,
-          fileId: msg.fileId,
-          bytesUploaded: Number(msg.bytesUploaded) || 0,
-        });
-        return;
-      }
-
-      case 'transfer:cloud-ready': {
-        this.transfers.relayCloudReady({
-          fromDeviceId: deviceId,
-          targetDeviceId: msg.targetDeviceId,
-          transferId: msg.transferId,
-          fileId: msg.fileId,
-          linkId: msg.linkId,
-          shareUrl: msg.shareUrl,
-        });
         return;
       }
     }

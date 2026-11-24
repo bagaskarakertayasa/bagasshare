@@ -33,11 +33,23 @@ export function normalizeIpToGroup(rawIp: string): string {
   return full.slice(0, 4).join(':');
 }
 
+function isLoopbackAddress(addr: string | undefined): boolean {
+  if (!addr) return false;
+  const cleaned = addr.trim().toLowerCase();
+  return (
+    cleaned === '127.0.0.1' ||
+    cleaned === '::1' ||
+    cleaned === '::ffff:127.0.0.1'
+  );
+}
+
 /**
  * Mengambil IP client dengan memperhatikan keputusan keamanan D2 (`trustProxy`).
+ * Header proxy hanya dipercaya jika koneksi TCP masuk berasal dari proxy loopback lokal.
  */
 export function extractClientIp(req: IncomingMessage, trustProxy: boolean): string {
-  if (trustProxy) {
+  const remoteAddr = req.socket?.remoteAddress;
+  if (trustProxy && isLoopbackAddress(remoteAddr)) {
     const xRealIp = req.headers['x-real-ip'];
     if (typeof xRealIp === 'string' && xRealIp.trim()) {
       return xRealIp.trim();
@@ -48,5 +60,5 @@ export function extractClientIp(req: IncomingMessage, trustProxy: boolean): stri
       if (first) return first;
     }
   }
-  return req.socket?.remoteAddress || '127.0.0.1';
+  return remoteAddr || '127.0.0.1';
 }

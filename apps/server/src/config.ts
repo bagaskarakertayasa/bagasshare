@@ -1,6 +1,8 @@
 import { resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import type { R2Config } from './r2.js';
+import { normalizeR2AccountId, type R2Config } from './r2.js';
+
+export { normalizeR2AccountId };
 
 function loadDotEnvIfPresent(): void {
   const candidates = [
@@ -38,16 +40,6 @@ export interface ServerConfig {
   dbPath: string;
   staticDir?: string;
   r2?: R2Config;
-}
-
-export function normalizeR2AccountId(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  let cleaned = raw.trim().toLowerCase();
-  cleaned = cleaned.replace(/^https?:\/\//, '');
-  cleaned = cleaned.split('/')[0] || '';
-  cleaned = cleaned.replace(/\.r2\.cloudflarestorage\.com$/, '');
-  cleaned = cleaned.replace(/\.eu$/, '').replace(/\.fedramp$/, '');
-  return cleaned || undefined;
 }
 
 function parsePortFromArgs(): number | undefined {

@@ -12,6 +12,7 @@
   import Toast from './components/Toast.svelte';
 
   let standaloneFileInput = $state<HTMLInputElement | null>(null);
+  const currentYear = new Date().getFullYear();
 
   function handleStandaloneFiles(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -174,6 +175,12 @@
   <Toast />
 {/if}
 
+<footer class="app-footer">
+  <div class="app-footer-inner tabular">
+    Copyright © {currentYear} Bagaskara Kertayasa
+  </div>
+</footer>
+
 <style>
   .full-state {
     padding-top: var(--space-8);
@@ -229,7 +236,33 @@
     margin-top: var(--space-4);
   }
 
+  .app-footer {
+    border-top: 1px solid var(--line);
+    background-color: var(--ground);
+  }
+
+  .app-footer-inner {
+    max-width: 1160px;
+    margin: 0 auto;
+    padding: var(--space-4) var(--space-6);
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--ink-muted);
+    text-align: center;
+  }
+
+  @media (max-width: 1023px) {
+    .app-footer-inner {
+      padding-left: var(--space-5);
+      padding-right: var(--space-5);
+    }
+  }
+
   @media (max-width: 639px) {
+    .app-footer-inner {
+      padding-left: var(--space-4);
+      padding-right: var(--space-4);
+    }
     .mobile-quota {
       display: block;
     }

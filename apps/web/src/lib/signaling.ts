@@ -5,7 +5,14 @@ import {
 } from '@bagas-share/shared';
 
 const DEVICE_ID_STORAGE_KEY = 'bagas_share_device_id';
+const SESSION_TOKEN_STORAGE_KEY = 'bagas_share_session_token';
 const PAIR_TOKEN_SESSION_KEY = 'bagas_share_pair_token';
+
+function generateClientToken(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : 'tok_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+}
 
 export function getOrCreateDeviceId(): string {
   // Gunakan sessionStorage agar setiap tab yang dibuka di browser yang sama
@@ -16,14 +23,25 @@ export function getOrCreateDeviceId(): string {
       return existingTabId;
     }
   }
-  const id =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : 'dev_' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  const id = generateClientToken();
   if (typeof sessionStorage !== 'undefined') {
     sessionStorage.setItem(DEVICE_ID_STORAGE_KEY, id);
   }
   return id;
+}
+
+function getOrCreateSessionToken(): string {
+  if (typeof sessionStorage !== 'undefined') {
+    const existing = sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
+    if (existing && /^[a-zA-Z0-9_-]{16,128}$/.test(existing)) {
+      return existing;
+    }
+  }
+  const token = generateClientToken();
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+  }
+  return token;
 }
 
 export function getSessionPairToken(): string | null {
@@ -59,9 +77,10 @@ export class SignalingClient {
     this.clearTimers();
 
     const deviceId = getOrCreateDeviceId();
+    const sessionToken = getOrCreateSessionToken();
     const pairToken = getSessionPairToken();
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const params = new URLSearchParams({ deviceId });
+    const params = new URLSearchParams({ deviceId, sessionToken });
     if (pairToken) params.set('pairToken', pairToken);
 
     const url = `${proto}//${location.host}/ws?${params.toString()}`;

@@ -7,13 +7,18 @@ export interface R2Config {
   bucketName: string;
 }
 
-function cleanAccountId(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .split('/')[0]!
-    .replace(/\.r2\.cloudflarestorage\.com$/, '');
+export function normalizeR2AccountId(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let cleaned = raw.trim().toLowerCase();
+  cleaned = cleaned.replace(/^https?:\/\//, '');
+  cleaned = cleaned.split('/')[0] || '';
+  cleaned = cleaned.replace(/\.r2\.cloudflarestorage\.com$/, '');
+  cleaned = cleaned.replace(/\.eu$/, '').replace(/\.fedramp$/, '');
+  return cleaned || undefined;
+}
+
+function r2Host(accountId: string): string {
+  return `${normalizeR2AccountId(accountId) || accountId.trim().toLowerCase()}.r2.cloudflarestorage.com`;
 }
 
 function sha256Hex(data: string): string {
@@ -61,7 +66,7 @@ export function createR2PresignedUrl(params: {
   queryParams?: Record<string, string>;
 }): string {
   const { config, method, objectKey, expiresInSec, queryParams = {} } = params;
-  const host = `${cleanAccountId(config.accountId)}.r2.cloudflarestorage.com`;
+  const host = r2Host(config.accountId);
   const canonicalUri = `/${encodeRfc3986(config.bucketName)}/${encodeS3Key(objectKey)}`;
   const { amzDate, dateStamp } = toAmzDate();
   const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
@@ -122,7 +127,7 @@ export async function sendSignedR2Request(params: {
     body = '',
     contentType,
   } = params;
-  const host = `${cleanAccountId(config.accountId)}.r2.cloudflarestorage.com`;
+  const host = r2Host(config.accountId);
   const canonicalUri = `/${encodeRfc3986(config.bucketName)}/${encodeS3Key(objectKey)}`;
   const { amzDate, dateStamp } = toAmzDate();
   const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
@@ -253,5 +258,20 @@ export async function r2DeleteObject(
     objectKey,
   }).catch(() => {
     // Abaikan error saat hapus objek yang mungkin sudah terhapus
+  });
+}
+
+export async function r2AbortMultipartUpload(
+  config: R2Config,
+  objectKey: string,
+  uploadId: string
+): Promise<void> {
+  await sendSignedR2Request({
+    config,
+    method: 'DELETE',
+    objectKey,
+    queryParams: { uploadId },
+  }).catch(() => {
+    // Abaikan error jika multipart upload sudah selesai atau dibatalkan
   });
 }

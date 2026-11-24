@@ -19,12 +19,40 @@ function generateShortLinkId(): string {
   return randomBytes(6).toString('base64url'); // 8 karakter URL-safe
 }
 
+const REST_RATE_LIMIT_PER_MIN = 30;
+const REST_RATE_WINDOW_MS = 60_000;
+
 export function registerLinkRoutes(
   app: FastifyInstance,
   db: StateDatabase,
   r2: R2Config | undefined,
   trustProxy: boolean
 ): void {
+  const apiRate = new Map<string, { count: number; resetAt: number }>();
+
+  function checkApiRate(ip: string, nowMs: number = Date.now()): boolean {
+    if (apiRate.size > 1000) {
+      for (const [k, v] of apiRate) {
+        if (nowMs > v.resetAt) apiRate.delete(k);
+      }
+    }
+    const entry = apiRate.get(ip);
+    if (!entry || nowMs > entry.resetAt) {
+      apiRate.set(ip, { count: 1, resetAt: nowMs + REST_RATE_WINDOW_MS });
+      return true;
+    }
+    entry.count += 1;
+    return entry.count <= REST_RATE_LIMIT_PER_MIN;
+  }
+
+  app.addHook('onRequest', async (req, reply) => {
+    if (!req.url.startsWith('/api/links')) return;
+    const ip = extractClientIp(req.raw, trustProxy);
+    if (!checkApiRate(ip)) {
+      return reply.code(429).send({ error: 'rate_limited' });
+    }
+  });
+
   // 1. Cek status fitur Link & sisa kuota harian (3 link/hari/IP)
   app.get('/api/links/quota', async (req) => {
     const ip = extractClientIp(req.raw, trustProxy);
@@ -62,6 +90,8 @@ export function registerLinkRoutes(
     const safeName = sanitizeFilename(fileName);
     const objectKey = `links/${linkId}/${safeName}`;
 
+    // F1: Reservasi kuota harian langsung saat /init agar request paralel tidak bisa melewati batas 3 link/hari
+    db.incrementLinksCreated(ip);
     const uploadId = await r2CreateMultipartUpload(r2, objectKey, mimeType);
     const record = db.createSharedLinkRecord({
       linkId,
@@ -117,13 +147,13 @@ export function registerLinkRoutes(
 
     await r2CompleteMultipartUpload(r2, record.objectKey, record.uploadId, parts);
     db.markSharedLinkReady(record.linkId);
-    const updatedQuota = db.incrementLinksCreated(record.senderIp);
+    const currentQuota = db.getLinkQuotaStatus(record.senderIp);
 
     return {
       ok: true,
       linkId: record.linkId,
       expiresAt: new Date(record.expiresAt).toISOString(),
-      quotaRemaining: updatedQuota.remaining,
+      quotaRemaining: currentQuota.remaining,
     };
   });
 

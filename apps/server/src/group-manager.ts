@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import {
   GROUP_MAX_DEVICES,
@@ -12,6 +13,7 @@ import { assignUniqueDisplayName, parseUserAgent } from './ua-name.js';
 
 export interface ConnectedDevice {
   deviceId: string;
+  sessionToken: string;
   baseName: string;
   displayName: string;
   kind: DeviceKind;
@@ -30,6 +32,7 @@ export class GroupManager {
 
   registerOrReconnect(params: {
     deviceId: string;
+    sessionToken: string;
     groupId: string;
     source: GroupSource;
     userAgent: string | undefined;
@@ -39,27 +42,32 @@ export class GroupManager {
   }): { ok: true; device: ConnectedDevice } | { ok: false; reason: 'group_full' } {
     const nowMs = params.nowMs ?? Date.now();
     const existing = this.devices.get(params.deviceId);
+    let effectiveDeviceId = params.deviceId;
 
-    // Jika device sedang reconnect (mis. setelah refresh dalam < 15 detik) di grup yang sama
-    if (existing && existing.groupId === params.groupId) {
-      if (existing.ws && existing.ws !== params.ws) {
-        try {
-          existing.ws.close();
-        } catch {
-          // abaikan
-        }
-      }
-      existing.ws = params.ws;
-      existing.lastHeartbeatAt = nowMs;
-      existing.clientIp = params.clientIp;
-      existing.source = params.source;
-      this.broadcastGroup(existing.groupId);
-      return { ok: true, device: existing };
-    }
-
-    // Jika pindah grup dari grup lama, hapus dulu dari grup lama
+    // F4: Hanya izinkan reconnect ke deviceId yang sama jika sessionToken rahasia cocok
     if (existing) {
-      this.removeDevice(existing.deviceId);
+      if (existing.sessionToken === params.sessionToken) {
+        if (existing.groupId === params.groupId) {
+          if (existing.ws && existing.ws !== params.ws) {
+            try {
+              existing.ws.close();
+            } catch {
+              // abaikan
+            }
+          }
+          existing.ws = params.ws;
+          existing.lastHeartbeatAt = nowMs;
+          existing.clientIp = params.clientIp;
+          existing.source = params.source;
+          this.broadcastGroup(existing.groupId);
+          return { ok: true, device: existing };
+        }
+        // Pemilik sah berpindah grup
+        this.removeDevice(existing.deviceId);
+      } else {
+        // Klien lain mencoba memakai deviceId yang sudah aktif: jangan putus korban, beri ID baru
+        effectiveDeviceId = randomUUID();
+      }
     }
 
     const groupSet = this.groups.get(params.groupId) ?? new Set<string>();
@@ -83,7 +91,8 @@ export class GroupManager {
     const colorSlot = this.pickColorSlot(usedSlots, groupSet.size);
 
     const device: ConnectedDevice = {
-      deviceId: params.deviceId,
+      deviceId: effectiveDeviceId,
+      sessionToken: params.sessionToken,
       baseName,
       displayName,
       kind,

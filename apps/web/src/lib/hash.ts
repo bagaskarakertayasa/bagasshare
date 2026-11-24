@@ -17,14 +17,6 @@ export async function sha256ChunkBytes(data: Uint8Array): Promise<Uint8Array> {
   return hasher.digest('binary');
 }
 
-export function bytesToHex(bytes: Uint8Array): string {
-  let out = '';
-  for (let i = 0; i < bytes.length; i++) {
-    out += bytes[i]!.toString(16).padStart(2, '0');
-  }
-  return out;
-}
-
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   if (a.byteLength !== b.byteLength) return false;
   for (let i = 0; i < a.byteLength; i++) {

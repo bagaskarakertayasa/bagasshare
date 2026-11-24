@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { formatWitaDateTime } from '../lib/i18n/index.js';
+  import { copyTextToClipboard } from '../lib/download.js';
   import { appState } from '../lib/state.svelte.js';
 
   let digits = $state<string[]>(['', '', '', '', '', '']);
@@ -54,32 +56,12 @@
 
   async function copyCode() {
     if (!appState.createdPairingCode) return;
-    try {
-      await navigator.clipboard.writeText(appState.createdPairingCode.code);
+    const ok = await copyTextToClipboard(appState.createdPairingCode.code);
+    if (ok) {
       copied = true;
       setTimeout(() => {
         copied = false;
       }, 2_000);
-    } catch {
-      // abaikan
-    }
-  }
-
-  function formatWitaExpiry(iso: string): string {
-    try {
-      return new Intl.DateTimeFormat(
-        appState.locale === 'id' ? 'id-ID' : 'en-US',
-        {
-          timeZone: 'Asia/Makassar',
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        }
-      ).format(new Date(iso));
-    } catch {
-      return iso;
     }
   }
 
@@ -177,7 +159,11 @@
             </div>
             <p class="expiry-note">
               {appState.t('pairingExpiresNote', {
-                time: formatWitaExpiry(appState.createdPairingCode.expiresAt),
+                time: formatWitaDateTime(
+                  appState.createdPairingCode.expiresAt,
+                  appState.locale,
+                  true
+                ),
               })}
             </p>
           {:else}
