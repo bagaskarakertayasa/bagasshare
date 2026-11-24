@@ -81,6 +81,7 @@ export async function uploadFileToCloudflareR2(params: {
 
     const initData = (await initRes.json()) as {
       linkId: string;
+      uploadSecret?: string;
       chunkSize: number;
       partUrls: Array<{ partNumber: number; url: string }>;
     };
@@ -122,7 +123,10 @@ export async function uploadFileToCloudflareR2(params: {
     const compRes = await fetch(`/api/links/${initData.linkId}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parts: completedParts }),
+      body: JSON.stringify({
+        uploadSecret: initData.uploadSecret,
+        parts: completedParts,
+      }),
     });
 
     if (!compRes.ok) {

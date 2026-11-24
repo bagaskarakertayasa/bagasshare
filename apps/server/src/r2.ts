@@ -229,6 +229,12 @@ export async function r2CompleteMultipartUpload(
   const sorted = [...parts].sort((a, b) => a.partNumber - b.partNumber);
   const xmlParts = sorted
     .map((p) => {
+      if (!Number.isInteger(p.partNumber) || p.partNumber < 1 || p.partNumber > 10_000) {
+        throw new Error('PartNumber tidak valid');
+      }
+      if (typeof p.etag !== 'string' || !/^"?[a-fA-F0-9-]{8,128}"?$/.test(p.etag)) {
+        throw new Error('ETag tidak valid');
+      }
       const cleanEtag = p.etag.startsWith('"') ? p.etag : `"${p.etag}"`;
       return `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${cleanEtag}</ETag></Part>`;
     })

@@ -5,6 +5,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   ci-check:
     name: Build & Unit Test
@@ -40,11 +43,15 @@ jobs:
     steps:
       - name: SSH & Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
+          envs: GH_TOKEN,GH_REPO
           script_stop: true
           script: |
             export NVM_DIR="$HOME/.nvm"
@@ -67,7 +74,9 @@ jobs:
             fi
 
             echo "--> Menarik perubahan terbaru dari branch main..."
-            git fetch https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
+            AUTH_B64=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)
+            git -c http.extraheader="AUTHORIZATION: basic $AUTH_B64" fetch "https://github.com/${GH_REPO}.git" main
+            unset AUTH_B64 GH_TOKEN
             git reset --hard FETCH_HEAD
 
             echo "--> Menginstal dependencies dan mem-build monorepo..."

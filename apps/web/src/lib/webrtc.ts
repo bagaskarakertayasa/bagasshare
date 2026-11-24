@@ -282,6 +282,7 @@ export class WebRtcTransferSession {
 
   private setupReceiverChannel(dc: RTCDataChannel): void {
     let activeMeta: TransferFileMeta | null = null;
+    let activeTotalChunks = 0;
     let receivedBytes = 0;
     let segmentStartChunk = 0;
     let lastReceivedChunkIndex = -1;
@@ -344,6 +345,9 @@ export class WebRtcTransferSession {
           if (ctrl.type === 'file:start') {
             activeMeta =
               this.filesMeta.find((f) => f.fileId === ctrl.fileId) ?? null;
+            activeTotalChunks = activeMeta
+              ? Math.ceil(activeMeta.size / CHUNK_SIZE_BYTES)
+              : 0;
             receivedBytes = Math.min(
               ctrl.size,
               ctrl.startChunkIndex * CHUNK_SIZE_BYTES
@@ -445,6 +449,16 @@ export class WebRtcTransferSession {
           }
         } else if (ev.data instanceof ArrayBuffer && activeMeta) {
           const decoded = decodeChunkFrame(ev.data);
+          // M2: Batasi indeks chunk dan total byte masuk sesuai ukuran file yang disetujui
+          if (
+            decoded.chunkIndex >= activeTotalChunks ||
+            decoded.payload.byteLength > CHUNK_SIZE_BYTES ||
+            receivedBytes + decoded.payload.byteLength > activeMeta.size
+          ) {
+            this.callbacks.onFailedChecksum(activeMeta.fileId);
+            this.close();
+            return;
+          }
           const actualChunkSha = await sha256ChunkBytes(decoded.payload);
           if (!equalBytes(actualChunkSha, decoded.sha256Bytes)) {
             this.callbacks.onFailedChecksum(activeMeta.fileId);

@@ -56,6 +56,7 @@ export interface SharedLinkRecord {
   linkId: string;
   objectKey: string;
   uploadId: string;
+  uploadSecret: string;
   fileName: string;
   fileSize: number;
   mimeType: string;
@@ -97,6 +98,7 @@ export class StateDatabase {
         link_id TEXT PRIMARY KEY,
         object_key TEXT NOT NULL,
         upload_id TEXT NOT NULL,
+        upload_secret TEXT NOT NULL DEFAULT '',
         file_name TEXT NOT NULL,
         file_size INTEGER NOT NULL,
         mime_type TEXT NOT NULL,
@@ -132,6 +134,15 @@ export class StateDatabase {
         expires_at INTEGER NOT NULL
       );
     `);
+
+    // Migrasi aman untuk DB produksi yang sudah ada sebelum kolom upload_secret ditambahkan (F7)
+    try {
+      this.db.exec(
+        `ALTER TABLE shared_links ADD COLUMN upload_secret TEXT NOT NULL DEFAULT ''`
+      );
+    } catch {
+      // Kolom sudah ada
+    }
   }
 
   getQuotaStatus(ip: string, nowMs: number = Date.now()): {
@@ -364,6 +375,7 @@ export class StateDatabase {
     linkId: string;
     objectKey: string;
     uploadId: string;
+    uploadSecret: string;
     fileName: string;
     fileSize: number;
     mimeType: string;
@@ -375,13 +387,14 @@ export class StateDatabase {
     this.db
       .prepare(
         `INSERT INTO shared_links (
-          link_id, object_key, upload_id, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)`
+          link_id, object_key, upload_id, upload_secret, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)`
       )
       .run(
         params.linkId,
         params.objectKey,
         params.uploadId,
+        params.uploadSecret,
         params.fileName,
         params.fileSize,
         params.mimeType,
@@ -393,6 +406,7 @@ export class StateDatabase {
       linkId: params.linkId,
       objectKey: params.objectKey,
       uploadId: params.uploadId,
+      uploadSecret: params.uploadSecret,
       fileName: params.fileName,
       fileSize: params.fileSize,
       mimeType: params.mimeType,
@@ -406,7 +420,7 @@ export class StateDatabase {
   getSharedLink(linkId: string): SharedLinkRecord | null {
     const row = this.db
       .prepare(
-        `SELECT link_id, object_key, upload_id, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
+        `SELECT link_id, object_key, upload_id, upload_secret, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
          FROM shared_links WHERE link_id = ?`
       )
       .get(linkId) as
@@ -414,6 +428,7 @@ export class StateDatabase {
           link_id: string;
           object_key: string;
           upload_id: string;
+          upload_secret: string;
           file_name: string;
           file_size: number;
           mime_type: string;
@@ -428,6 +443,7 @@ export class StateDatabase {
       linkId: row.link_id,
       objectKey: row.object_key,
       uploadId: row.upload_id,
+      uploadSecret: row.upload_secret || '',
       fileName: row.file_name,
       fileSize: Number(row.file_size),
       mimeType: row.mime_type,
@@ -453,13 +469,14 @@ export class StateDatabase {
   getExpiredSharedLinks(nowMs: number = Date.now()): SharedLinkRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT link_id, object_key, upload_id, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
+        `SELECT link_id, object_key, upload_id, upload_secret, file_name, file_size, mime_type, sender_ip, status, created_at, expires_at
          FROM shared_links WHERE expires_at < ? AND status != 'deleted'`
       )
       .all(nowMs) as Array<{
       link_id: string;
       object_key: string;
       upload_id: string;
+      upload_secret: string;
       file_name: string;
       file_size: number;
       mime_type: string;
@@ -473,6 +490,7 @@ export class StateDatabase {
       linkId: r.link_id,
       objectKey: r.object_key,
       uploadId: r.upload_id,
+      uploadSecret: r.upload_secret || '',
       fileName: r.file_name,
       fileSize: Number(r.file_size),
       mimeType: r.mime_type,

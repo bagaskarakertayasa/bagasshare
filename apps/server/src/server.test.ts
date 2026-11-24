@@ -78,6 +78,7 @@ describe('StateDatabase (kuota WITA & pairing)', () => {
       linkId: 'abc12345',
       objectKey: 'links/abc12345/video.mp4',
       uploadId: 'up-1',
+      uploadSecret: 'secret-upload-token-1234',
       fileName: 'video.mp4',
       fileSize: 1024 * 1024,
       mimeType: 'video/mp4',

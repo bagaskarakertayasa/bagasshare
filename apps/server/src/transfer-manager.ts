@@ -49,7 +49,16 @@ export class TransferManager {
       return;
     }
 
-    if (receiver.busy && !params.resumeTransferId) {
+    // M3: Validasi kepemilikan resumeTransferId sebelum melewati cek busy atau menimpa transfer yang ada
+    const existingForResume = params.resumeTransferId
+      ? this.transfers.get(params.resumeTransferId)
+      : undefined;
+    const isValidResumeOwner =
+      existingForResume !== undefined &&
+      existingForResume.senderDeviceId === sender.deviceId &&
+      existingForResume.receiverDeviceId === receiver.deviceId;
+
+    if (receiver.busy && !isValidResumeOwner) {
       this.groups.sendTo(sender.deviceId, {
         type: 'transfer:status',
         transferId: 'busy',
@@ -69,12 +78,15 @@ export class TransferManager {
       return;
     }
 
-    const transferId = params.resumeTransferId || randomUUID();
+    // Jika resumeTransferId milik transfer orang lain, jangan timpa — buat transferId baru
+    const transferId =
+      params.resumeTransferId && (!existingForResume || isValidResumeOwner)
+        ? params.resumeTransferId
+        : randomUUID();
     const expiresAt = nowMs + TRANSFER_REQUEST_TIMEOUT_MS;
 
-    const existing = this.transfers.get(transferId);
-    if (existing?.timeoutHandle) {
-      clearTimeout(existing.timeoutHandle);
+    if (isValidResumeOwner && existingForResume?.timeoutHandle) {
+      clearTimeout(existingForResume.timeoutHandle);
     }
 
     const timeoutHandle = setTimeout(() => {
